@@ -7,6 +7,7 @@ local widgets = require('gui.widgets')
 local overlays = require('plugins.overlay')
 local native = reqscript('internal/rail-crane/native')
 local picker = reqscript('internal/rail-crane/picker')
+local rail = reqscript('internal/rail-crane/rail')
 local sprites = reqscript('internal/rail-crane/sprites')
 
 local function xykey(p)
@@ -55,7 +56,9 @@ local function locateCrane(api, pos)
     for _, crane in ipairs(api.list()) do
         local pose = api.pose(crane)
         local origin = snap(pose.origin)
-        if equal(pos, origin) or equal(pos, snap(pose.rear)) or equal(pos, crane.dock) then
+        local operator = snap(pose.operator or pose.origin)
+        local onMast = pos.x == origin.x and pos.y == origin.y and operator.z <= pos.z and pos.z <= origin.z
+        if onMast or equal(pos, snap(pose.rear)) or equal(pos, crane.dock) then
             return crane
         end
     end
@@ -123,26 +126,37 @@ local function craneLayers(put, putLayer, api, crane, z)
     end
 
     local pose = api.pose(crane)
-    local origin, rear = snap(pose.origin), snap(pose.rear)
-    local deck_z = origin.z
-    local north_south = crane.rail[1].x == crane.rail[#crane.rail].x
+    local origin = snap(pose.origin)
+    local base = pose.operator or pose.origin
+    local north_south = pose.north_south
     local wheel = math.floor((pose.origin.x + pose.origin.y) * 4) % 2 == 1
     local offset_x, offset_y = offsets(pose.origin, origin)
     local function putMoving(pos, name, ...)
-        drawPieces(putLayer, pos, sprites.shift(sprites.layer(name, ...), offset_x, offset_y))
+        local tile = snap(pos)
+        local x, y = offsets(pos, tile)
+        drawPieces(putLayer, tile, sprites.shift(sprites.layer(name, ...), x, y))
     end
-    if z == deck_z then
+    if z == base.z then
         if crane.dock then
             local tile = dfhack.maps.getTileType(crane.dock)
-            if tile and df.tiletype.attrs[tile].special == df.tiletype_special.TRACK then
-                put(crane.dock, 'dock', north_south)
+            if tile and (crane.stationary or df.tiletype.attrs[tile].special == df.tiletype_special.TRACK) then
+                put(crane.dock, 'dock', crane.dy == 1)
             end
         end
-        putMoving(origin, 'chassis', north_south, wheel)
-        putMoving(rear, 'prep', north_south)
+        if crane.stationary then
+            putMoving(base, 'foundation', north_south)
+        else
+            putMoving(base, 'chassis', north_south, wheel)
+        end
+        putMoving(pose.rear, 'prep', north_south)
+        if base.z < origin.z then putMoving(base, 'hub') end
         if pose.prepared then drawBlock(putLayer, pose.prepared, z) end
+    elseif base.z < z and z <= origin.z then
+        putMoving({x=pose.origin.x, y=pose.origin.y, z=z}, 'mast')
+    end
+    if z == origin.z then
         drawPieces(putLayer, origin, sprites.arm(pose.angle, pose.extension, offset_x, offset_y))
-        putMoving(origin, 'hub')
+        putMoving(pose.origin, 'hub')
     end
     drawHoist(putLayer, pose, crane, origin, offset_x, offset_y, z)
 end
@@ -334,7 +348,8 @@ end
 function CraneScreen:headline()
     local crane = self:crane()
     if not crane then return 'The crane is unavailable.' end
-    return ('%d queued column%s'):format(#crane.queue, #crane.queue == 1 and '' or 's')
+    return ('Boom z %d  |  %d queued column%s'):format(rail.buildLevel(crane), #crane.queue,
+        #crane.queue == 1 and '' or 's')
 end
 
 function CraneScreen:selectionSize()
@@ -418,10 +433,10 @@ end
 function CraneScreen:inspect(pos)
     local crane = self:crane()
     if not crane then return false, 'The crane is unavailable.' end
-    if pos.z > crane.rail[1].z then return false, 'The crane cannot build above its deck.' end
+    if pos.z > rail.buildLevel(crane) then return false, 'The crane cannot build above its boom.' end
     local _, reachable = self:reachable(pos.z)
     if not reachable[xykey(pos)] then
-        return false, 'The target is outside reach or on the carriage path.'
+        return false, 'The target is outside reach or on the crane footprint.'
     end
     return self.api.inspect(crane, pos)
 end
@@ -624,6 +639,46 @@ function show(api, crane_id)
     return active_screen
 end
 
+local function placementMenu()
+    local interface = gui.get_interface_rect()
+    local x1, y1 = interface.x1 + 4, 4
+    local state = overlays.get_state()
+    local planner = state.db['buildingplan.planner']
+    local config = state.config['buildingplan.planner']
+    if planner and config and config.enabled and not planner.widget:is_minimized() then
+        local errors = planner.widget.subviews.errors
+        local rect, parent = errors.frame_rect, errors.frame_parent_rect
+        if rect and parent then
+            return {x1=parent.x1+rect.x1, x2=parent.x1+rect.x2, y1=y1, y2=parent.y1+rect.y2}
+        end
+    end
+
+    -- The native placement menu uses a nine-slice frame. Match its edge
+    -- tiles to locate the lower border even when placement errors add rows.
+    local read = dfhack.screen.readTile
+    local function tile(x, y)
+        local pen = read(x, y)
+        return pen and pen.tile
+    end
+    local corner, top, side = tile(x1, y1), tile(x1+1, y1), tile(x1, y1+1)
+    if corner and top and side and corner ~= top and corner ~= side then
+        local x2, y2 = x1+2, y1+2
+        while x2 < interface.x2 and tile(x2, y1) == top do x2 = x2+1 end
+        while y2 < interface.y2 and tile(x1, y2) == side do y2 = y2+1 end
+        if tile(x1, y2) == side + (side-corner) and tile(x2, y2) then
+            return {
+                x1=x1, x2=x2, y1=y1, y2=y2, background=read(x1+1,y1+1),
+                left=read(x1,y1+1), right=read(x2,y1+1),
+                bottom_left=read(x1,y2), bottom=read(x1+1,y2), bottom_right=read(x2,y2),
+            }
+        end
+    end
+
+    local request = df.global.buildreq
+    return {x1=x1, x2=math.min(x1+55,interface.x2), y1=y1,
+        y2=18+math.max(1,#request.errors+#request.warnings)}
+end
+
 function overlay(api)
     local CraneOverlay = defclass(nil, overlays.OverlayWidget)
     CraneOverlay.ATTRS{
@@ -652,38 +707,107 @@ function overlay(api)
 
     local PlacementOverlay = defclass(nil, overlays.OverlayWidget)
     PlacementOverlay.ATTRS{
-        desc='Checks the track while placing a Rail Crane.',
+        desc='Sets the crane height and checks its base and mast clearance.',
         default_enabled=true,
-        default_pos={x=-3,y=5},
-        frame={w=48,h=3},
+        fullscreen=true,
+        default_pos={x=1,y=1},
         viewscreens='dwarfmode/Building/Placement',
-        visible=native.isPlacement,
+        visible=native.isChoosingSite,
     }
 
+    function PlacementOverlay:computeFrame(parent)
+        return gui.mkdims_wh(0,0,parent.width,parent.height)
+    end
+
     function PlacementOverlay:init()
+        self.height = 0
         self.message = ''
-        self:addviews{widgets.WrappedLabel{
-            view_id='placement_hint',
-            frame={l=0,r=0,t=0,h=3},
-            auto_height=false,
-            text_to_wrap=function() return self.message end,
-            text_pen={fg=COLOR_WHITE,bg=COLOR_BLACK},
+        local pen = {fg=COLOR_WHITE,bg=COLOR_BLACK,keep_lower=true}
+        self:addviews{widgets.Panel{
+            view_id='placement_settings', frame={l=0,t=0,w=50,h=5},
+            visible=function() return self.footer ~= nil end,
+            subviews={
+                action({l=0,t=0,w=4}, '[-]', nil, function() self:changeHeight(-1) end,
+                    {enabled=function() return self.height > 0 end, pen=pen}),
+                widgets.Label{
+                    frame={l=5,t=0,w=20},
+                    text={{text=function() return ('Boom height +%d z'):format(self.height) end}},
+                    text_pen=pen,
+                },
+                action({l=25,t=0,w=4}, '[+]', nil, function() self:changeHeight(1) end, {pen=pen}),
+                widgets.WrappedLabel{
+                    view_id='placement_cost', frame={l=0,r=0,t=2,h=1}, auto_height=false,
+                    text_to_wrap=function()
+                        return ('2 blocks, 1 mechanism, 1 rope or chain, %d logs'):format(native.logCost(self.height))
+                    end,
+                    text_pen=pen,
+                },
+                widgets.WrappedLabel{
+                    view_id='placement_hint', frame={l=0,r=0,t=3,h=2}, auto_height=false,
+                    text_to_wrap=function() return self.message end,
+                    text_pen=pen,
+                },
+            },
         }}
     end
 
+    function PlacementOverlay:paintFooter(dc, menu)
+        local x1, x2 = menu.x1, menu.x2
+        local top = menu.background and menu.y2 or menu.y2+1
+        local settings = self.subviews.placement_settings
+        local frame = settings.frame
+        local bottom = top+frame.h+1
+        self.footer = {x1=x1, y1=top, x2=x2, y2=bottom}
+        if frame.l ~= x1+2 or frame.t ~= top+1 or frame.w ~= x2-x1-3 then
+            frame.l, frame.t, frame.w = x1+2, top+1, x2-x1-3
+            settings:updateLayout(self.frame_body)
+        end
+        local screen = dfhack.screen
+        if menu.background then
+            screen.fillRect(menu.background,x1+1,top,x2-1,bottom-1)
+            screen.fillRect(menu.left,x1,top,x1,bottom-1)
+            screen.fillRect(menu.right,x2,top,x2,bottom-1)
+            screen.paintTile(menu.bottom_left,x1,bottom)
+            screen.fillRect(menu.bottom,x1+1,bottom,x2-1,bottom)
+            screen.paintTile(menu.bottom_right,x2,bottom)
+        else
+            screen.fillRect(gui.CLEAR_PEN,x1+1,top+1,x2-1,bottom-1)
+            gui.paint_frame(dc, gui.mkdims_wh(x1,top,x2-x1+1,bottom-top+1), gui.FRAME_INTERIOR_MEDIUM)
+        end
+    end
+
+    function PlacementOverlay:changeHeight(delta)
+        local _, _, levels = dfhack.maps.getSize()
+        self.height = math.max(0, math.min(levels - 2, self.height + delta))
+        self.checked_at = nil
+        self.subviews.placement_cost:updateLayout()
+        native.setPlacementHeight(self.height)
+    end
+
     function PlacementOverlay:render(dc)
-        local pos = mapMouse()
+        native.setPlacementHeight(self.height)
+        local menu = placementMenu()
+        self.menu = menu
+        self:paintFooter(dc, menu)
+        local mx, my = dfhack.screen.getMousePos()
+        local over = gui.is_in_rect(menu,mx,my) or gui.is_in_rect(self.footer,mx,my)
+        local pos = not over and mapMouse() or nil
         local timestamp = dfhack.getTickCount()
         if not equal(pos, self.pos) or not self.checked_at or timestamp - self.checked_at >= 160 then
             self.pos, self.checked_at = pos, timestamp
-            self.invalid, self.reason = nil, nil
+            self.invalid, self.reason, self.plan = nil, nil, nil
             if pos then
-                local ok, reason = api.checkPlacement(pos)
-                self.invalid, self.reason = not ok, reason
+                local ok, reason, plan = api.checkPlacement(pos, self.height)
+                self.invalid, self.reason, self.plan = not ok, reason, plan
             end
         end
-        local message = self.invalid and (self.reason or 'Choose a straight minecart track.')
-            or 'Place the Rail Crane on a straight minecart track.'
+        local message = 'Choose dry ground or a level track.'
+        if self.invalid then
+            message = self.reason or message
+        elseif self.plan then
+            message = ('%s crane  |  Boom z %d'):format(self.plan.stationary and 'Stationary' or 'Rolling',
+                rail.buildLevel(self.plan))
+        end
         if message ~= self.message then
             self.message = message
             self.subviews.placement_hint:updateLayout()
@@ -699,15 +823,23 @@ function overlay(api)
     end
 
     function PlacementOverlay:onInput(keys)
+        if PlacementOverlay.super.onInput(self, keys) then return true end
         local pos
         if keys._MOUSE_L then
+            local x,y = dfhack.screen.getMousePos()
+            if self.footer and gui.is_in_rect(self.footer,x,y) then return true end
+            if self.menu and gui.is_in_rect(self.menu,x,y) then return false end
             pos = mapMouse()
         elseif keys.SELECT then
             local cursor = df.global.buildreq.pos
             if cursor:isValid() then pos = cursor end
         end
         if not pos then return false end
-        return not api.checkPlacement(pos)
+        if not native.setPlacementHeight(self.height) then
+            dfhack.gui.showAnnouncement('Reopen the crane placement to load its materials.', COLOR_YELLOW, true)
+            return true
+        end
+        return not api.checkPlacement(pos, self.height)
     end
 
     return {crane=CraneOverlay,placement=PlacementOverlay}

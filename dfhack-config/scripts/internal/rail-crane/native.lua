@@ -1,6 +1,7 @@
 --@ module = true
 
 local BUILDING_CODE = 'RAIL_CRANE'
+local BASE_LOGS = 2
 
 local function matchesDefinition(id)
     local raw = df.building_def.find(id)
@@ -57,6 +58,70 @@ local function permittedDefinition()
         local raw = df.building_def.find(id)
         if raw and raw.code == BUILDING_CODE then return raw end
     end
+end
+
+function logCost(height)
+    return BASE_LOGS + height
+end
+
+local function ensureIngredient(raw, itemType, quantity)
+    for _, entry in ipairs(raw.build_items) do
+        if entry.item_type == itemType then
+            entry.quantity = quantity
+            return
+        end
+    end
+    local entry = df.building_def_item:new()
+    entry.item_type, entry.quantity = itemType, quantity
+    entry.item_subtype, entry.mat_type, entry.mat_index = -1, -1, -1
+    entry.metal_ore, entry.min_dimension, entry.has_tool_use = -1, -1, -1
+    raw.build_items:insert('#', entry)
+end
+
+function prepareMaterials()
+    local raw = permittedDefinition()
+    if not raw then return end
+    -- Saved worlds can still carry the original two building filters.
+    ensureIngredient(raw, df.item_type.CHAIN, 1)
+    ensureIngredient(raw, df.item_type.WOOD, BASE_LOGS)
+end
+
+function isChoosingSite()
+    return isPlacement() and df.global.buildreq.stage == 1
+end
+
+function setPlacementHeight(height)
+    if not isChoosingSite() then return false end
+    local logs, hasRope
+    for _, requirement in ipairs(df.global.buildreq.requirements) do
+        if requirement.filter.item_type == df.item_type.WOOD then logs = requirement end
+        if requirement.filter.item_type == df.item_type.CHAIN then hasRope = true end
+    end
+    if not logs or not hasRope then return false end
+    logs.count_required = logCost(height)
+    return true
+end
+
+function towerHeight(building)
+    -- The native order carries its height in the quantity of logs it paid for.
+    -- Items move from the construction job to the workshop as they are hauled.
+    local count, seen = 0, {}
+    local function countLogs(item)
+        if item and item:getType() == df.item_type.WOOD and not seen[item.id] then
+            seen[item.id] = true
+            count = count + item:getStackSize()
+        end
+    end
+    for _, entry in ipairs(building.contained_items) do countLogs(entry.item) end
+    for _, job in ipairs(building.jobs) do
+        if job.job_type == df.job_type.ConstructBuilding then
+            for _, ref in ipairs(job.items) do countLogs(ref.item) end
+            for _, filter in ipairs(job.job_items.elements) do
+                if filter.item_type == df.item_type.WOOD then count = count + math.max(0, filter.quantity) end
+            end
+        end
+    end
+    return math.max(0, count - BASE_LOGS)
 end
 
 local blankDockTexture

@@ -1,6 +1,13 @@
 --@ module = true
 
 local maps = dfhack.maps
+local directions = {
+    {out='N', back='S', x=0, y=-1},
+    {out='E', back='W', x=1, y=0},
+    {out='S', back='N', x=0, y=1},
+    {out='W', back='E', x=-1, y=0},
+}
+local sides = {-1, 1}
 
 function xykey(pos)
     return ('%d,%d'):format(pos.x, pos.y)
@@ -8,6 +15,10 @@ end
 
 function coordinates(pos)
     return ('(%d,%d,%d)'):format(pos.x, pos.y, pos.z)
+end
+
+function samePosition(a, b)
+    return a and b and a.x == b.x and a.y == b.y and a.z == b.z
 end
 
 local function attrs(pos)
@@ -46,135 +57,251 @@ local function openAbove(x, y, z, allowWallTop)
     return false
 end
 
-function stations(crane, index)
-    local pivot = crane.rail[index]
-    return pivot, {
-        x=pivot.x + crane.dx * crane.rear,
-        y=pivot.y + crane.dy * crane.rear,
-        z=pivot.z,
-    }
-end
-
-local function trackDirections(pos, dockId, topologyOnly)
-    local attr, name = attrs(pos)
-    if not attr or attr.shape ~= df.tiletype_shape.FLOOR or attr.special ~= df.tiletype_special.TRACK
-        or (not topologyOnly and not dryFloor(pos, dockId)) then
-        return nil
-    end
-    return name and name:match('Track([NSEW]+)$')
-end
-
-local function trackAxis(pos, dockId, topologyOnly)
-    local directions = pos and trackDirections(pos, dockId, topologyOnly)
-    if not directions then return end
-    if not directions:find('[NS]') then return 1, 0 end
-    if not directions:find('[EW]') then return 0, 1 end
-end
-
-local function trackValid(crane, index)
-    local directions = trackDirections(crane.rail[index], crane.building_id)
-    if not directions then return false end
-    local backward, forward = 'N', 'S'
-    if crane.dx == 1 then backward, forward = 'W', 'E' end
-    return not directions:find('[^' .. backward .. forward .. ']')
-        and (index == 1 or directions:find(backward, 1, true))
-        and (index == #crane.rail or directions:find(forward, 1, true))
-end
-
-function stopValid(crane, index)
-    local operator, rear = stations(crane, index)
-    if not trackValid(crane, index) then
-        return false, 'Requires connected, level, straight tracks at ' .. coordinates(operator)
-    end
-    if not dryFloor(rear, crane.building_id) then
-        return false, 'Requires a dry rear platform floor at ' .. coordinates(rear)
-    end
-    if not openAbove(operator.x, operator.y, operator.z + 1) or not openAbove(rear.x, rear.y, rear.z + 1) then
-        return false, 'The carriage needs open air above the operator and rear platform at ' .. coordinates(operator)
+local function shaftClear(pos, height)
+    for z = pos.z + 1, pos.z + height + 1 do
+        if not openAbove(pos.x, pos.y, z) then return false end
     end
     return true
 end
 
-local function segment(start, dockId, dx, dy, topologyOnly)
-    local directions = trackDirections(start, dockId, topologyOnly)
-    local backward, forward = dx == 1 and 'W' or 'N', dx == 1 and 'E' or 'S'
-    local offAxis = '[^' .. backward .. forward .. ']'
-    if not directions or directions:find(offAxis) then return end
-    local function at(offset)
-        return {x=start.x + offset * dx, y=start.y + offset * dy, z=start.z}
+function buildLevel(crane)
+    return crane.rail[1].z + (crane.height or 0)
+end
+
+function boomPosition(crane, index)
+    local pivot = crane.rail[index]
+    return {x=pivot.x, y=pivot.y, z=buildLevel(crane)}
+end
+
+function nextIndex(crane, index, step)
+    local nextIndex = index + step
+    if crane.closed then return (nextIndex - 1) % #crane.rail + 1 end
+    if crane.rail[nextIndex] then return nextIndex end
+end
+
+function stations(crane, index)
+    local pivot = crane.rail[index]
+    local rear = crane.rail[nextIndex(crane, index, crane.rear)]
+    if rear then return pivot, rear end
+    local front = crane.rail[nextIndex(crane, index, -crane.rear)]
+    local dx = front and pivot.x - front.x or crane.dx * crane.rear
+    local dy = front and pivot.y - front.y or crane.dy * crane.rear
+    return pivot, {x=pivot.x + dx, y=pivot.y + dy, z=pivot.z}
+end
+
+local function trackDirections(pos)
+    local attr, name = attrs(pos)
+    if not attr or attr.shape ~= df.tiletype_shape.FLOOR or attr.special ~= df.tiletype_special.TRACK then return end
+    return name and name:match('Track([NSEW]+)$')
+end
+
+local function follows(pos, adjacent, direction)
+    local exits = trackDirections(pos)
+    local incoming = exits and exits:find(direction.out, 1, true) and trackDirections(adjacent)
+    return incoming and incoming:find(direction.back, 1, true) ~= nil
+end
+
+local function connections(pos, exits)
+    local neighbors = {}
+    for _, direction in ipairs(directions) do
+        if exits:find(direction.out, 1, true) then
+            local adjacent = {x=pos.x + direction.x, y=pos.y + direction.y, z=pos.z}
+            local incoming = trackDirections(adjacent)
+            if incoming and incoming:find(direction.back, 1, true) then neighbors[#neighbors + 1] = adjacent end
+        end
     end
-    local function endpoint(step, out, back)
-        local offset, connections = 0, directions
-        while connections:find(out, 1, true) do
-            local adjacent = at(offset + step)
-            local nextDirections = trackDirections(adjacent, dockId, topologyOnly)
-            if not nextDirections or nextDirections:find(offAxis)
-                or not nextDirections:find(back, 1, true)
-                or (not topologyOnly and not openAbove(adjacent.x, adjacent.y, adjacent.z + 1)) then
+    return neighbors
+end
+
+local function before(a, b)
+    return not b or a.y < b.y or (a.y == b.y and a.x < b.x)
+end
+
+function trackNetwork(start)
+    if not trackDirections(start) then return end
+    local network = {z=start.z, members={}}
+    local tiles, seen = {start}, {[xykey(start)]=true}
+    local first, endpoint
+    local i = 1
+    while i <= #tiles do
+        local pos = tiles[i]
+        local neighbors = connections(pos, trackDirections(pos))
+        network.members[xykey(pos)] = neighbors
+        if before(pos, first) then first = pos end
+        if #neighbors < 2 and before(pos, endpoint) then endpoint = pos end
+        if #neighbors > 2 then network.branched = true end
+        for _, adjacent in ipairs(neighbors) do
+            local key = xykey(adjacent)
+            if not seen[key] then
+                seen[key] = true
+                tiles[#tiles + 1] = adjacent
+            end
+        end
+        i = i + 1
+    end
+    network.key = coordinates(first)
+    if network.branched then return network end
+
+    -- Order an open route from one end, or a loop from a stable tile.
+    local route, indices = {}, {}
+    local pos = endpoint or first
+    while pos do
+        local key = xykey(pos)
+        route[#route + 1] = pos
+        indices[key] = #route
+        pos = nil
+        for _, adjacent in ipairs(network.members[key]) do
+            if not indices[xykey(adjacent)] then
+                pos = adjacent
                 break
             end
-            offset, connections = offset + step, nextDirections
-        end
-        return offset
-    end
-    return at, endpoint(-1, backward, forward), endpoint(1, forward, backward)
-end
-
-function trackSpan(pos)
-    local dx, dy = trackAxis(pos, nil, true)
-    if not dx then return end
-    local at, first, last = segment(pos, nil, dx, dy, true)
-    return at(first), at(last)
-end
-
-local function fitRear(at, low, high, rear, dockId)
-    local margin = at((rear == -1 and low or high) + rear)
-    if not dryFloor(margin, dockId) or not openAbove(margin.x, margin.y, margin.z + 1) then
-        if rear == -1 then low = low + 1 else high = high - 1 end
-    end
-    return low, high
-end
-
-local function makePositions(at, low, high)
-    local positions = {}
-    for offset = low, high do positions[#positions + 1] = at(offset) end
-    return positions
-end
-
-function discover(start, dockId)
-    local dx, dy = trackAxis(start, dockId)
-    if not dx then
-        return nil, 'Choose a straight, level minecart track tile.'
-    end
-    local at, first, last = segment(start, dockId, dx, dy, false)
-    if first == last then return nil, 'Connect at least two straight, level track tiles.' end
-    local best
-    for _, rear in ipairs({-1, 1}) do
-        local low, high = fitRear(at, first, last, rear, dockId)
-        if low <= 0 and high >= 0 and low < high and (not best or high - low + 1 > #best.rail) then
-            local crane = {
-                rail=makePositions(at, low, high), dx=dx, dy=dy, reach=3, rear=rear, index=1-low, queue={},
-                building_id=dockId, dock={x=start.x,y=start.y,z=start.z},
-            }
-            local valid = stopValid(crane, crane.index)
-            if valid then best = crane end
         end
     end
-    if not best then return nil, 'The crane needs a dry rear deck and open space above the track.' end
-    return best
+    network.rail, network.indices, network.closed = route, indices, not endpoint
+    return network
+end
+
+function stopValid(crane, index)
+    if not index or not crane.rail[index] then return false, 'The track ends here' end
+    local operator, rear = stations(crane, index)
+    if crane.stationary then
+        if not dryFloor(operator, crane.building_id) then
+            return false, 'Requires a dry crane base at ' .. coordinates(operator)
+        end
+    else
+        local exits = trackDirections(operator)
+        if not exits or not dryFloor(operator, crane.building_id) then
+            return false, 'Requires dry, level track at ' .. coordinates(operator)
+        end
+        if #exits > 2 and #connections(operator, exits) > 2 then
+            return false, 'The crane cannot pass a rail junction at ' .. coordinates(operator)
+        end
+    end
+    if not dryFloor(rear, crane.building_id) then
+        return false, 'Requires a dry rear platform floor at ' .. coordinates(rear)
+    end
+    local height = crane.height or 0
+    if not shaftClear(operator, height) or not shaftClear(rear, height) then
+        return false, 'Keep open air above the crane and rear platform at ' .. coordinates(operator)
+    end
+    return true
+end
+
+function stepValid(crane, from, to)
+    if not stopValid(crane, to) then return false end
+    local pos, adjacent = crane.rail[from], crane.rail[to]
+    for _, direction in ipairs(directions) do
+        if direction.x == adjacent.x - pos.x and direction.y == adjacent.y - pos.y then
+            return follows(pos, adjacent, direction)
+        end
+    end
+    return false
+end
+
+local function visitStops(crane, visit)
+    if not stopValid(crane, crane.index) then return end
+    if visit(crane.index) then return end
+    -- Walk both directions in distance order, visiting each stop once.
+    local seen = {[crane.index]=true}
+    local cursors = {crane.index, crane.index}
+    while cursors[1] or cursors[2] do
+        for i, side in ipairs(sides) do
+            local from = cursors[i]
+            local to = from and nextIndex(crane, from, side)
+            cursors[i] = nil
+            if to and not seen[to] and stepValid(crane, from, to) then
+                seen[to], cursors[i] = true, to
+                if visit(to, side) then return end
+            end
+        end
+    end
+end
+
+function discover(start, dockId, height, conflict, network)
+    height = math.tointeger(height or 0)
+    if not height or height < 0 then return nil, 'Choose a nonnegative boom height.' end
+    if not dryFloor(start, dockId) then return nil, 'Choose an available dry floor or level track.' end
+    if not shaftClear(start, height) then return nil, 'Keep open air through and above the mast.' end
+
+    local dock = {x=start.x, y=start.y, z=start.z}
+    local reason
+    local function candidate(positions, index, dx, dy, rear, stationary, closed)
+        local crane = {
+            rail=positions, index=index, dx=dx, dy=dy, rear=rear, height=height,
+            stationary=stationary, closed=closed, reach=3, queue={}, building_id=dockId, dock=dock,
+        }
+        local valid, blocked = stopValid(crane, crane.index)
+        if valid then blocked = conflict and conflict(crane) end
+        if valid and not blocked then return crane end
+        reason = blocked
+    end
+
+    if not network then
+        local attr = attrs(start)
+        if attr.special == df.tiletype_special.TRACK then
+            return nil, 'Choose a level track or a dry floor for the crane.'
+        end
+        for _, axis in ipairs({{1,0}, {0,1}}) do
+            for _, rear in ipairs(sides) do
+                local crane = candidate({dock}, 1, axis[1], axis[2], rear, true)
+                if crane then return crane end
+            end
+        end
+        return nil, reason
+    end
+
+    if network.branched then return nil, 'Choose a rail route without junctions.' end
+    local index = network.indices[xykey(start)]
+    local adjacent = network.rail[index + 1] or network.rail[index - 1]
+    local horizontal
+    if adjacent then
+        horizontal = adjacent.x ~= start.x
+    else
+        horizontal = trackDirections(start):find('[EW]') ~= nil
+    end
+    local dx, dy = horizontal and 1 or 0, horizontal and 0 or 1
+    local best, bestCount = nil, 0
+    for _, rear in ipairs(sides) do
+        local crane = candidate(network.rail, index, dx, dy, rear, false, network.closed)
+        if crane then
+            local count = 0
+            visitStops(crane, function() count = count + 1 end)
+            if count > bestCount then best, bestCount = crane, count end
+        end
+    end
+    if best then return best end
+    return nil, reason or 'The crane needs a dry rear platform and clear mast space.'
 end
 
 function updatedRun(crane)
+    if crane.stationary then return end
     -- Start at the occupied tile so removing a rail never moves the carriage.
-    local pivot = crane.rail[crane.index]
-    local at, low, high = segment(pivot, crane.building_id, crane.dx, crane.dy, true)
-    if not at then return end
-    local trackStart = at(low)
-    low, high = fitRear(at, low, high, crane.rear, crane.building_id)
-    if low > 0 or high < 0 or (1 - low == crane.index and high - low + 1 == #crane.rail) then
-        return nil, nil, trackStart
+    local pivot, oldRear = stations(crane, crane.index)
+    local network = trackNetwork(pivot)
+    if not network then return end
+    if network.branched then return nil, network.key end
+    local unchanged = network.closed == (crane.closed == true) and #network.rail == #crane.rail
+    if unchanged then
+        for i, pos in ipairs(network.rail) do
+            if not samePosition(pos, crane.rail[i]) then
+                unchanged = false
+                break
+            end
+        end
     end
-    return makePositions(at, low, high), 1 - low, trackStart
+    if unchanged then return nil, network.key end
+    local route = {
+        rail=network.rail, indices=network.indices, index=network.indices[xykey(pivot)],
+        rear=crane.rear, closed=network.closed, dx=crane.dx, dy=crane.dy, height=crane.height,
+        building_id=crane.building_id,
+    }
+    local _, sameSide = stations(route, route.index)
+    if not samePosition(oldRear, sameSide) then
+        route.rear = -route.rear
+        local _, otherSide = stations(route, route.index)
+        if not samePosition(oldRear, otherSide) then route.rear = crane.rear end
+    end
+    return route, network.key
 end
 
 function footprint(crane)
@@ -188,7 +315,7 @@ end
 
 function inRange(crane, pivot, target)
     local dx, dy = target.x - pivot.x, target.y - pivot.y
-    return target.z <= pivot.z and dx * dx + dy * dy <= crane.reach * crane.reach
+    return target.z <= buildLevel(crane) and dx * dx + dy * dy <= crane.reach * crane.reach
 end
 
 function boomClear(pivot, target)
@@ -206,44 +333,28 @@ function boomClear(pivot, target)
 end
 
 function stopFor(crane, target)
-    local index = crane.index
-    local first = crane.rail[1]
-    if target.z > first.z then return nil end
-
-    local x, y = target.x - first.x, target.y - first.y
-    local projection = 1 + x * crane.dx + y * crane.dy
-    local lateral = x * crane.dy - y * crane.dx
-    local reachAlongTrack = crane.reach ^ 2 - lateral ^ 2
-    if reachAlongTrack < 0 or not stopValid(crane, index) then return nil end
-    local span = math.floor(math.sqrt(reachAlongTrack))
-
-    local best, bestOffset, bestTravel
-    local function consider(i)
-        local offset, travel = math.abs(i - projection), math.abs(i - index)
-        if offset > span or (best and (offset > bestOffset or (offset == bestOffset and travel >= bestTravel))) then
-            return false
+    if target.z > buildLevel(crane) then return nil end
+    local best, bestStep, bestDistance, bestAligned
+    visitStops(crane, function(i, step)
+        local pivot = boomPosition(crane, i)
+        local dx, dy = target.x - pivot.x, target.y - pivot.y
+        local distance = dx * dx + dy * dy
+        local aligned = dx == 0 or dy == 0
+        if distance > crane.reach ^ 2 then return end
+        if best then
+            if bestAligned and not aligned then return end
+            if bestAligned == aligned and distance >= bestDistance then return end
         end
-        if not boomClear(crane.rail[i], target) then return false end
-        best, bestOffset, bestTravel = i, offset, travel
-        return offset == 0
-    end
-    if consider(index) then return index end
-    local last = math.min(#crane.rail, projection + span)
-    for i = index + 1, last do
-        if not stopValid(crane, i) then break end
-        if consider(i) then return i end
-    end
-    local earliest = math.max(1, projection - span)
-    for i = index - 1, earliest, -1 do
-        if not stopValid(crane, i) then break end
-        if consider(i) then return i end
-    end
-    return best
+        if not boomClear(pivot, target) then return end
+        best, bestStep, bestDistance, bestAligned = i, step, distance, aligned
+        return distance <= 1 and aligned
+    end)
+    return best, bestStep
 end
 
 function reachable(crane, z)
     local tiles, seen = {}, footprint(crane)
-    if z > crane.rail[1].z then return tiles end
+    if z > buildLevel(crane) then return tiles end
     for _, pivot in ipairs(crane.rail) do
         for y = pivot.y - crane.reach, pivot.y + crane.reach do
             for x = pivot.x - crane.reach, pivot.x + crane.reach do

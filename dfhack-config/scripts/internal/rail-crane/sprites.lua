@@ -107,6 +107,43 @@ local function chassis(pixels, north_south, moving)
     return north_south and transpose(pixels) or pixels
 end
 
+local function foundation(pixels, north_south)
+    rect(pixels, 1, 8, 31, 27, shadow)
+    for _, x in ipairs{3, 22} do
+        rect(pixels, x, 6, x+7, 25, ink)
+        rect(pixels, x+1, 7, x+6, 24, stone_dark)
+        rect(pixels, x+1, 7, x+3, 22, stone)
+        pixel(pixels, x+2, 8, stone_light)
+    end
+    rect(pixels, 1, 10, 30, 22, ink)
+    rect(pixels, 2, 11, 29, 21, wood_dark)
+    for y = 11, 19, 4 do
+        rect(pixels, 3, y, 28, y+2, wood)
+        rect(pixels, 3, y, 28, y, wood_light)
+    end
+    return north_south and transpose(pixels) or pixels
+end
+
+local function mast(pixels)
+    rect(pixels, 9, 7, 25, 27, shadow)
+    line(pixels, 10, 9, 22, 24, 2, wood_dark)
+    line(pixels, 10, 24, 22, 9, 2, wood_dark)
+    line(pixels, 10, 9, 22, 24, 0, wood_face)
+    line(pixels, 10, 24, 22, 9, 0, wood_face)
+    for _, x in ipairs{7, 21} do
+        rect(pixels, x, 6, x+4, 25, ink)
+        rect(pixels, x+1, 7, x+3, 24, wood)
+        rect(pixels, x+1, 8, x+1, 23, wood_light)
+    end
+    for _, y in ipairs{6, 23} do
+        rect(pixels, 7, y, 25, y+2, ink)
+        rect(pixels, 8, y, 24, y, metal)
+        pixel(pixels, 9, y+1, pin)
+        pixel(pixels, 23, y+1, pin)
+    end
+    return pixels
+end
+
 local function prep_deck(pixels, north_south)
     rect(pixels, 2, 8, 31, 27, shadow)
     rect(pixels, 0, 8, 31, 23, ink)
@@ -220,7 +257,7 @@ local function waypoint(pixels, color)
 end
 
 local artists = {
-    chassis=chassis, prep=prep_deck, dock=dock, hub=hub, rope=rope, block=block,
+    chassis=chassis, foundation=foundation, mast=mast, prep=prep_deck, dock=dock, hub=hub, rope=rope, block=block,
     reach=function(pixels) return brackets(pixels, rgba(81, 183, 168, 130), 4) end,
     queued=function(pixels) return waypoint(pixels, rgba(233, 175, 71)) end,
     marked=function(pixels) return waypoint(pixels, rgba(128, 234, 116)) end,
@@ -231,13 +268,18 @@ local artists = {
 
 local fallback = {
     chassis={'#', COLOR_BROWN}, prep={'=', COLOR_BROWN}, dock={'=', COLOR_GREY}, hub={'O', COLOR_GREY},
+    foundation={'#', COLOR_BROWN}, mast={'H', COLOR_BROWN},
     boom={'-', COLOR_BROWN},
     rope={'|', COLOR_BROWN}, block={254, COLOR_WHITE}, reach={250, COLOR_CYAN},
     queued={'x', COLOR_YELLOW}, marked={'X', COLOR_LIGHTGREEN},
     hovered={'+', COLOR_WHITE}, invalid={'!', COLOR_LIGHTRED}, track={'+', COLOR_LIGHTCYAN},
 }
 
-local sprites, composed = {}, {}
+-- DFHack 53.17-r1 can crash when deleting a registered SDL surface. Keep
+-- the handles alive and reserve room for single layers when composites fill up.
+local TEXTURE_LIMIT = 8192
+local SINGLE_LAYER_RESERVE = 2048
+local sprites, textures = {}, {}
 local texture_count = 0
 
 function layer(name, ...)
@@ -371,30 +413,39 @@ function arm(angle, extension, offset_x, offset_y)
     return arms[key]
 end
 
+local function textureFor(layers)
+    local composite = #layers > 1
+    local key = layers[1].key
+    if composite then
+        local keys = {}
+        for i, sprite in ipairs(layers) do keys[i] = sprite.key end
+        key = table.concat(keys, '/')
+    end
+
+    if textures[key] then return textures[key] end
+    local limit = composite and TEXTURE_LIMIT - SINGLE_LAYER_RESERVE or TEXTURE_LIMIT
+    if texture_count >= limit then return end
+
+    local pixels = {}
+    for i = 1, SIZE * SIZE do pixels[i] = 0 end
+    for _, sprite in ipairs(layers) do
+        for i, color in pairs(sprite.pixels) do pixels[i] = color end
+    end
+    local handle = dfhack.textures.createTile(pixels, SIZE, SIZE)
+    if not handle or handle == 0 then return end
+    textures[key], texture_count = handle, texture_count + 1
+    return handle
+end
+
 function pen(layers)
-    local glyph = layers[#layers].fallback
+    local top = layers[#layers]
+    local glyph = top.fallback
     local map_pen = {ch=glyph[1], fg=glyph[2], keep_lower=true}
     if not dfhack.screen.inGraphicsMode() then return map_pen end
-    local keys = {}
-    for i, sprite in ipairs(layers) do keys[i] = sprite.key end
-    local key = table.concat(keys, '/')
-    if not composed[key] then
-        -- Bound texture usage when several cranes overlap in novel combinations.
-        if texture_count >= 768 then
-            for _, handle in pairs(composed) do dfhack.textures.deleteHandle(handle) end
-            composed, texture_count = {}, 0
-        end
-        local pixels = {}
-        for i = 1, SIZE * SIZE do pixels[i] = 0 end
-        for _, sprite in ipairs(layers) do
-            for i, color in pairs(sprite.pixels) do pixels[i] = color end
-        end
-        composed[key] = dfhack.textures.createTile(pixels, SIZE, SIZE)
-        if composed[key] then texture_count = texture_count + 1 end
-    end
-    if composed[key] then
-        map_pen.tile = dfhack.textures.getTexposByHandle(composed[key])
-    end
+    local handle = textureFor(layers)
+    if not handle and #layers > 1 then handle = textureFor({top}) end
+    local texpos = handle and dfhack.textures.getTexposByHandle(handle)
+    if texpos and texpos > 0 then map_pen.tile = texpos end
     return map_pen
 end
 

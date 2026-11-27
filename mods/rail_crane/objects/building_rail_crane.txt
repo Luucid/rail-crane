@@ -20,4 +20,6 @@ building_rail_crane
     [COLOR:3:1:6:0:1]
     [BUILD_ITEM:2:BLOCKS:NONE:NONE:NONE]
     [BUILD_ITEM:1:TRAPPARTS:NONE:NONE:NONE]
-    [TOOLTIP:Build on a straight, level minecart track. Uses two blocks and one mechanism. Click the finished crane to mark wall columns.]
+    [BUILD_ITEM:1:CHAIN:NONE:NONE:NONE]
+    [BUILD_ITEM:2:WOOD:NONE:NONE:NONE]
+    [TOOLTIP:Build on dry ground or a level minecart track. Choose a boom height before selecting materials. Each raised level costs one extra log.]

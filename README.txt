@@ -1,13 +1,12 @@
-RAIL CRANE 1.4.2
+RAIL CRANE 1.5.2
 Dwarf Fortress Steam 53.17 with DFHack 53.17-r1
 
 INSTALL
 Close Dwarf Fortress. In Steam, open Dwarf Fortress > Manage > Browse local
 files to open the game folder.
 
-Download the Rail-Crane-1.4.2.zip asset from GitHub Releases and extract it
-into the game folder. Let Windows merge the dfhack-config and mods folders
-and replace the Rail Crane scripts.
+Extract Rail-Crane-1.5.2.zip into the game folder. Let Windows merge the
+dfhack-config and mods folders and replace the Rail Crane scripts.
 
 If you use Code > Download ZIP on the main branch, open the folder inside
 the archive. Copy its dfhack-config and mods folders into the game folder.
@@ -27,31 +26,31 @@ keep that folder under %APPDATA%/Bay 12 Games/Dwarf Fortress instead of
 the game directory.
 
 BUILD A CRANE
-1. Build or carve a level, straight minecart track at least two tiles long
-   on dry land or on a pier or tower. Use north-south or east-west tracks
-   with connected ends. Leave a dry floor tile at one end for the
-   carriage's rear platform. Keep the track and rear deck clear
-   one z-level above.
-2. Open Build > Machines/Fluids > Rail Crane and click one of the track tiles.
-   Choose two blocks and one mechanism in the usual material picker.
-   Unpause so a dwarf can build the workshop.
-3. The completed workshop stays in place as the crane's dock. The carriage
-   detects the connected track and starts from the dock. It lines up
-   alongside a target when possible and uses the shortest available
-   reach when the end of the track or an obstruction prevents alignment.
-   Extend the connected straight track in either direction to increase
-   coverage. Join the new rails to the existing end and leave room for the
-   rear deck. The crane updates its coverage as the game runs.
+1. Open Build > Machines/Fluids > Rail Crane. Use [-] and [+] in the
+   placement panel to set the boom height. Height +0 works at the base level.
+2. Click a dry floor for a stationary crane or a level track for a rolling
+   crane. The route can turn or close into a loop. Use one continuous path
+   without junctions. Leave an adjacent dry floor for the rear platform and
+   open air through and above the mast and rear platform along the route.
+3. Choose two blocks, one mechanism, one rope or chain, and at least two
+   logs in the native material picker. Each extra z-level adds one log.
+   Logs can be mixed from any wood. Unpause for a dwarf to build the crane.
 
-You can run one crane per connected straight stretch of track, including
+The completed workshop is the dock. A rolling crane starts from the dock,
+lines up with each target when possible, and stretches past a track end
+when necessary. On a loop it takes the shortest clear route to its chosen
+stop. Extend its track, add turns, or close the loop and it will detect
+the change automatically.
+
+You can run one crane per connected track, including
 cranes still under construction. Cranes on separate tracks can work at
 the same time. If you join tracks that both have a crane, both cranes
 pause and keep their queues until you split the tracks or remove one crane.
 
 BUILD WALL COLUMNS
-Click the crane's cab, rear deck, or dock and select Build. Move the map and
-change z-levels with your normal controls. Highlighting shows the horizontal
-reach along the track. Click individual column tops, or switch to Outline,
+Click the crane's base, mast, rear platform, or dock and select Build. Move
+the map and change z-levels with your normal controls. Highlighting shows
+the crane's horizontal reach. Click individual column tops, or switch to Outline,
 click corners on one level, and use Close outline to mark the perimeter.
 
 Choose blocks after marking opens a searchable picker with the number of
@@ -69,22 +68,23 @@ Block preparation, lifting, and setting take four times the previous
 amount of in-game work time. The boom rewinds and retracts along its last
 working angle. It holds that angle until the crew starts the next lift.
 
-The selected z-level is included, up to the crane's deck. Columns start at
+The selected z-level is included, up to the crane's boom. Columns start at
 solid ground, seabed, or existing masonry. Leave open space for the cable.
 The crane can lower into water. A wall below the surface stays under water.
 The wall displaces water in the volume it occupies. Piers and towers need
 walkable access for the crew.
 
-The crane waits for an available adult civilian dwarf to board before it
-rolls. The operator rides to the next stop. The same dwarf can prepare
-blocks and operate the boom there. A dedicated worker can use a burrow
-that includes the crane's full track and rear platform path.
+The crew works at the base, and a raised boom hoists each block from the
+rear platform before swinging to the target. A rolling crane waits for an
+adult civilian dwarf to board and ride to the next stop. The same dwarf can
+prepare blocks and operate the boom. A dedicated worker can use a burrow
+covering the base, rear platform, and any track it uses.
 
 DISMANTLE
 Use Dismantle crane in its controls to give a dwarf a normal building
 removal job at the dock. The boom stops while the job is pending.
 
-Built walls are part of the fortress. Crane positions, boom angles, block
+Built walls are part of the fortress. Crane positions, heights, boom angles, block
 choices and queued progress are saved with the site. On reload an interrupted
 lift starts again from block preparation.
 

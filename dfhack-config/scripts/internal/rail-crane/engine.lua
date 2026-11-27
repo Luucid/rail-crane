@@ -59,19 +59,31 @@ local function standbyStatus(crane)
     return #crane.queue > 0 and 'Queued' or 'Ready'
 end
 
-local function footprintConflict(candidate, owner)
+local function platformsOverlap(tiles, deck, ceiling, other)
+    if other.rail[1].z > ceiling or deck > rail.buildLevel(other) + 1 then return false end
+    for key in pairs(rail.footprint(other)) do
+        if tiles[key] then return true end
+    end
+    return false
+end
+
+local function footprintConflict(candidate, owner, pending)
     local newSite = rail.footprint(candidate)
     local deck = candidate.rail[1].z
+    local ceiling = rail.buildLevel(candidate) + 1
     for _, other in ipairs(state.cranes) do
-        if other ~= owner and other.rail[1].z == deck then
-            for key in pairs(rail.footprint(other)) do
-                if newSite[key] then return 'The crane platforms would overlap.' end
-            end
+        if other ~= owner and platformsOverlap(newSite, deck, ceiling, other) then
+            return 'The crane platforms would overlap.'
         end
         for _, column in ipairs(other.queue) do
-            if column.next_z <= deck and deck <= column.z and newSite[rail.xykey(column)] then
-                return 'That track crosses a queued wall column.'
+            if column.next_z <= ceiling and deck <= column.z and newSite[rail.xykey(column)] then
+                return 'The crane would cross a queued wall column.'
             end
+        end
+    end
+    for _, other in ipairs(pending or {}) do
+        if platformsOverlap(newSite, deck, ceiling, other) then
+            return 'The crane would overlap a pending crane order.'
         end
     end
 end
@@ -84,12 +96,10 @@ local function dockPositions(buildings)
     return docks
 end
 
-local function trackClaimed(pos, dockId, docks)
-    local first, last = rail.trackSpan(pos)
-    if not first then return false end
+local function trackClaimed(network, dockId, docks)
+    if not network then return false end
     local function onTrack(tile)
-        return tile.z == first.z and first.x <= tile.x and tile.x <= last.x
-            and first.y <= tile.y and tile.y <= last.y
+        return tile.z == network.z and network.members[rail.xykey(tile)] ~= nil
     end
     for _, crane in ipairs(state.cranes) do
         if (not dockId or crane.building_id ~= dockId) and onTrack(crane.rail[crane.index]) then
@@ -104,52 +114,70 @@ local function trackClaimed(pos, dockId, docks)
     return false
 end
 
-local function planDock(pos, dockId, docks)
-    if trackClaimed(pos, dockId, docks) then return nil, 'That track already has a Rail Crane.' end
-    local crane, reason = rail.discover(pos, dockId)
-    if not crane then return nil, reason end
-    local conflict = footprintConflict(crane)
-    if conflict then return nil, conflict end
-    return crane
+local function planDock(pos, dockId, docks, height, pending)
+    local network = rail.trackNetwork(pos)
+    if trackClaimed(network, dockId, docks) then return nil, 'That track already has a Rail Crane.' end
+    return rail.discover(pos, dockId, height, function(crane)
+        return footprintConflict(crane, nil, pending)
+    end, network)
 end
 
-local function syncTrack(crane, positions, index)
-    if not positions then return false end
-    local candidate = {rail=positions, dx=crane.dx, dy=crane.dy, rear=crane.rear}
-    if footprintConflict(candidate, crane) then return false end
+local function remapRun(crane, route, run)
+    local _, oldRear = rail.stations(crane, crane.index)
+    local _, newRear = rail.stations(route, route.index)
+    if not rail.samePosition(oldRear, newRear) then return false end
 
-    local shift = index - crane.index
-    crane.rail, crane.index = positions, index
-    local run = running[crane.id]
-    if run and not run.retry then
-        run.stop = run.stop + shift
-        if run.next_index then run.next_index = run.next_index + shift end
-        if not run.placed and (not positions[run.stop] or (run.phase == 'travel' and not positions[run.next_index])) then
-            reset(crane, 'Waiting for a clear track and boom path', true)
+    local stop = route.indices[rail.xykey(crane.rail[run.stop])]
+    if not stop then return false end
+    if stop ~= route.index then
+        local oldNext = crane.rail[rail.nextIndex(crane, crane.index, run.step)]
+        local forward = rail.nextIndex(route, route.index, 1)
+        local backward = rail.nextIndex(route, route.index, -1)
+        if rail.samePosition(oldNext, route.rail[forward]) then
+            run.step, run.next_index = 1, forward
+        elseif rail.samePosition(oldNext, route.rail[backward]) then
+            run.step, run.next_index = -1, backward
+        else
+            return false
         end
+        if not route.closed and (stop - route.index) * run.step < 0 then return false end
     end
+    run.stop = stop
     return true
 end
 
-local function syncTracks()
+local function syncTrack(crane, route, pending)
+    if not route or footprintConflict(route, crane, pending) then return false end
+    local run = running[crane.id]
+    if run and not run.retry and not remapRun(crane, route, run) then
+        if run.placed then
+            reset(crane, standbyStatus(crane))
+        else
+            reset(crane, 'Waiting for a clear track and boom path', true)
+        end
+    end
+    crane.rail, crane.index, crane.rear, crane.closed = route.rail, route.index, route.rear, route.closed
+    return true
+end
+
+local function syncTracks(pending)
     local updates, users = {}, {}
     for i, crane in ipairs(state.cranes) do
-        local positions, index, first = rail.updatedRun(crane)
-        local track = first and rail.coordinates(first)
-        updates[i] = {positions=positions, index=index, track=track}
+        local route, track = rail.updatedRun(crane)
+        updates[i] = {route=route, track=track}
         if track then users[track] = (users[track] or 0) + 1 end
     end
     local changed = false
     for i, crane in ipairs(state.cranes) do
         if not crane.dismantling then
-            local run = updates[i]
-            local shared = run.track ~= nil and users[run.track] > 1
+            local update = updates[i]
+            local shared = update.track ~= nil and users[update.track] > 1
             if (crane.track_conflict == true) ~= shared then
                 crane.track_conflict = shared or nil
                 reset(crane, standbyStatus(crane))
                 changed = true
             end
-            if not shared and syncTrack(crane, run.positions, run.index) then changed = true end
+            if not shared and syncTrack(crane, update.route, pending) then changed = true end
         end
     end
     return changed
@@ -179,16 +207,19 @@ local function syncWorkshops()
     end
     local buildings = native.list()
     local docks = dockPositions(buildings)
+    local pending = {}
     for _, building in ipairs(buildings) do
         local id = building.id
         if not active[id] and not dfhack.buildings.markedForRemoval(building) then
-            local crane, reason = planDock(docks[id], id, docks)
+            local crane, reason = planDock(docks[id], id, docks, native.towerHeight(building), pending)
             if crane and native.usable(building) then
                 crane.id = state.next_id
                 state.next_id = state.next_id + 1
                 state.cranes[#state.cranes + 1] = crane
                 crane.status = standbyStatus(crane)
                 changed = true
+            elseif crane then
+                pending[#pending + 1] = crane
             elseif not crane and building:getBuildStage() == 0 then
                 dfhack.buildings.deconstruct(building)
                 docks[id] = nil
@@ -196,7 +227,7 @@ local function syncWorkshops()
             end
         end
     end
-    if syncTracks() or changed then persist() end
+    if syncTracks(pending) or changed then persist() end
 end
 
 local function removeColumn(crane, column)
@@ -206,10 +237,6 @@ local function removeColumn(crane, column)
             return
         end
     end
-end
-
-local function homeAngle(crane)
-    return math.atan(crane.dx, -crane.dy)
 end
 
 local function bearing(from, to)
@@ -253,7 +280,7 @@ local function nextWork(crane)
     local i = 1
     while i <= #crane.queue do
         local column = crane.queue[i]
-        local platform_z = crane.rail[1].z
+        local platform_z = rail.buildLevel(crane)
         local next_z = column.next_z
         if walls.isWall({x=column.x, y=column.y, z=next_z}) then
             while next_z <= column.z and walls.isWall({x=column.x, y=column.y, z=next_z}) do
@@ -263,11 +290,11 @@ local function nextWork(crane)
             if next_z > column.z then table.remove(crane.queue, i) end
             persist()
         else
-            local stop = rail.stopFor(crane, column)
+            local stop, step = rail.stopFor(crane, column)
             local target = {x=column.x, y=column.y, z=next_z}
             local ok, reason = walls.checkLift(target, platform_z)
             if not stop then
-                waiting = waiting or 'Waiting for a clear track and boom path'
+                waiting = waiting or 'Waiting for a clear crane and boom path'
             elseif not ok then
                 waiting = waiting or reason
             elseif not empty[column.material] then
@@ -275,7 +302,7 @@ local function nextWork(crane)
                 local item_id = walls.reserve(column.material, rear)
                 if item_id then
                     crane.reservation = item_id
-                    local run = {column=column, target=target, stop=stop}
+                    local run = {column=column, target=target, stop=stop, step=step}
                     running[crane.id] = run
                     phase(run, 'park', 0)
                     persist()
@@ -301,8 +328,9 @@ local function updateCrane(crane)
     local currentPhase = run.phase
     local done = now() >= run.start + run.duration
     local operator, rear = rail.stations(crane, crane.index)
+    local boom = rail.boomPosition(crane, crane.index)
     if not rail.stopValid(crane, crane.index) then
-        reset(crane, 'Waiting for the track and work platform to clear', true)
+        reset(crane, 'Waiting for the crane base and rear platform to clear', true)
         return
     end
     if not run.placed and not walls.resolve(crane.reservation, run.column.material) then
@@ -335,8 +363,8 @@ local function updateCrane(crane)
             reset(crane, 'Waiting for a dwarf to board the crane', true)
             return
         end
-        run.next_index = crane.index + (run.stop > crane.index and 1 or -1)
-        if not rail.stopValid(crane, run.next_index) then
+        run.next_index = rail.nextIndex(crane, crane.index, run.step)
+        if not rail.stepValid(crane, crane.index, run.next_index) then
             reset(crane, 'Waiting for the track ahead to clear', true)
             return
         end
@@ -345,7 +373,7 @@ local function updateCrane(crane)
     elseif currentPhase == 'wait_driver' then
         waitForWorker(crane, run, operator, crane.last_worker, 'park', 0, 'Waiting for a dwarf to board the crane')
     elseif currentPhase == 'travel' and done then
-        if not rail.stopValid(crane, run.next_index) then
+        if not rail.stepValid(crane, crane.index, run.next_index) then
             reset(crane, 'Waiting for the track ahead to clear', true)
             return
         end
@@ -381,6 +409,15 @@ local function updateCrane(crane)
             'Waiting for a dwarf at the controls')
     elseif currentPhase == 'swing_rear' then
         crane.status = 'Swinging to the rear platform'
+        if done then
+            if boom.z > rear.z then
+                phase(run, 'lower_rear', cableTicks(boom, rear))
+            else
+                phase(run, 'pickup', 9 * BLOCK_WORK_MULTIPLIER)
+            end
+        end
+    elseif currentPhase == 'lower_rear' then
+        crane.status = 'Lowering the hook to the rear platform'
         if done then phase(run, 'pickup', 9 * BLOCK_WORK_MULTIPLIER) end
     elseif currentPhase == 'pickup' then
         crane.status = 'Picking up the block'
@@ -392,21 +429,30 @@ local function updateCrane(crane)
             end
             run.lifted = true
         end
+        if done then
+            if boom.z > rear.z then
+                phase(run, 'hoist', cableTicks(boom, rear))
+            else
+                phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER)
+            end
+        end
+    elseif currentPhase == 'hoist' then
+        crane.status = 'Hoisting the block'
         if done then phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER) end
     elseif currentPhase == 'swing_target' then
         crane.status = 'Swinging to the column'
-        if done then phase(run, 'lower', cableTicks(operator, run.target)) end
+        if done then phase(run, 'lower', cableTicks(boom, run.target)) end
     elseif currentPhase == 'lower' then
         crane.status = 'Lowering the block'
         if done then phase(run, 'release', 6 * BLOCK_WORK_MULTIPLIER) end
     elseif currentPhase == 'release' then
         crane.status = 'Setting the wall block'
         if not done then return end
-        if not rail.boomClear(operator, run.target) then
+        if not rail.boomClear(boom, run.target) then
             reset(crane, 'Waiting for the overhead path to clear', true)
             return
         end
-        local ok, reason = walls.place(run.target, crane.reservation, run.column.material, operator.z)
+        local ok, reason = walls.place(run.target, crane.reservation, run.column.material, boom.z)
         if not ok then
             reset(crane, reason or 'Wall placement blocked', true)
             return
@@ -419,7 +465,7 @@ local function updateCrane(crane)
         if run.column.next_z > run.column.z then removeColumn(crane, run.column) end
         persist()
         crane.status = 'Rewinding'
-        phase(run, 'rewind', cableTicks(operator, run.target))
+        phase(run, 'rewind', cableTicks(boom, run.target))
     elseif currentPhase == 'rewind' and done then
         reset(crane, 'Ready')
     end
@@ -453,6 +499,7 @@ end
 local function restore()
     if state or not available() then return end
     state = dfhack.persistent.getSiteData(SITE_KEY, {cranes={}, next_id=1, enabled=true})
+    native.prepareMaterials()
     native.hideCompletedMount()
     nextWorkshopScan = 0
     workers.clear()
@@ -487,12 +534,25 @@ function api.list()
     return state and state.cranes or {}
 end
 
-function api.checkPlacement(pos)
+function api.checkPlacement(pos, height)
     restore()
     if not state then return nil, 'Load a fortress first.' end
-    local crane, reason = planDock(pos, nil, dockPositions(native.list()))
+    local buildings = native.list()
+    local docks = dockPositions(buildings)
+    local active, pending = {}, {}
+    for _, crane in ipairs(state.cranes) do
+        if crane.building_id then active[crane.building_id] = true end
+    end
+    for _, building in ipairs(buildings) do
+        local id = building.id
+        if not active[id] and not dfhack.buildings.markedForRemoval(building) then
+            local draft = planDock(docks[id], id, docks, native.towerHeight(building), pending)
+            if draft then pending[#pending + 1] = draft end
+        end
+    end
+    local crane, reason = planDock(pos, nil, docks, height, pending)
     if not crane then return nil, reason end
-    return true
+    return true, nil, crane
 end
 
 function api.dismantle(id)
@@ -533,16 +593,17 @@ end
 function api.inspect(crane, pos)
     if crane.track_conflict then return nil, SHARED_TRACK_STATUS end
     if not dfhack.maps.isValidTilePos(pos) then return nil, 'Tile is outside the map.' end
-    if pos.z > crane.rail[1].z then return nil, 'Above the crane platform.' end
+    local platform_z = rail.buildLevel(crane)
+    if pos.z > platform_z then return nil, 'Above the crane boom.' end
     local key = rail.xykey(pos)
     for _, other in ipairs(state.cranes) do
-        if rail.footprint(other)[key] then return nil, 'A track or work platform occupies this column.' end
+        if rail.footprint(other)[key] then return nil, 'A crane or its work platform occupies this column.' end
         for _, column in ipairs(other.queue) do
             if key == rail.xykey(column) then return nil, 'This column is already marked for a crane.' end
         end
     end
-    if not rail.stopFor(crane, pos) then return nil, 'Out of reach from the connected track or overhead is blocked.' end
-    local next_z, reason = walls.inspect(pos, crane.rail[1].z)
+    if not rail.stopFor(crane, pos) then return nil, 'Out of reach or the boom path is blocked.' end
+    local next_z, reason = walls.inspect(pos, platform_z)
     if next_z == nil then return nil, reason end
     return true, nil, next_z
 end
@@ -583,8 +644,10 @@ end
 
 function api.pose(crane)
     local operator, rear = rail.stations(crane, crane.index)
-    local angle = crane.boom_angle or homeAngle(crane)
-    local pose = {origin=operator, rear=rear, operator=operator, angle=angle, extension=1}
+    local boom = rail.boomPosition(crane, crane.index)
+    local north_south = operator.x == rear.x
+    local angle = crane.boom_angle or (north_south and math.pi or math.pi / 2)
+    local pose = {origin=boom, rear=rear, operator=operator, angle=angle, extension=1, north_south=north_south}
     local run = running[crane.id]
     if not run or run.retry then return pose end
     local name = run.phase
@@ -595,31 +658,40 @@ function api.pose(crane)
     end
     if name == 'travel' then
         local nextOperator, nextRear = rail.stations(crane, run.next_index)
-        pose.origin = {x=interpolate(operator.x, nextOperator.x, t), y=interpolate(operator.y, nextOperator.y, t), z=operator.z}
+        local x, y = interpolate(operator.x, nextOperator.x, t), interpolate(operator.y, nextOperator.y, t)
+        pose.origin = {x=x, y=y, z=boom.z}
         pose.rear = {x=interpolate(rear.x, nextRear.x, t), y=interpolate(rear.y, nextRear.y, t), z=rear.z}
-        pose.operator = pose.origin
+        pose.operator = {x=x, y=y, z=operator.z}
+        if t >= 0.5 then pose.north_south = nextOperator.x == nextRear.x end
         return pose
     end
 
     local rearAngle = bearing(operator, rear)
     local targetAngle, reach = bearing(operator, run.target)
-    local cableZ = operator.z
+    local cableZ = boom.z
     if name == 'swing_rear' then
         pose.angle = turn(angle, rearAngle, t)
-    elseif name == 'pickup' then
+    elseif name == 'lower_rear' or name == 'pickup' or name == 'hoist' then
         pose.angle = rearAngle
+        if name == 'lower_rear' then
+            cableZ = interpolate(boom.z, rear.z, t)
+        elseif name == 'hoist' then
+            cableZ = interpolate(rear.z, boom.z, t)
+        else
+            cableZ = rear.z
+        end
     elseif name == 'swing_target' then
         pose.angle = turn(rearAngle, targetAngle, t)
         pose.extension = interpolate(1, reach, t)
     elseif name == 'lower' or name == 'release' then
         pose.angle, pose.extension = targetAngle, reach
         local depth = name == 'lower' and t or 1
-        cableZ = interpolate(operator.z, run.target.z, depth)
+        cableZ = interpolate(boom.z, run.target.z, depth)
     elseif name == 'rewind' then
         pose.angle = targetAngle
         local wound = math.min(1, t * 1.5)
         local folded = math.max(0, t * 3 - 2)
-        cableZ = interpolate(run.target.z, operator.z, wound)
+        cableZ = interpolate(run.target.z, boom.z, wound)
         pose.extension = interpolate(reach, 1, folded)
     else
         return pose
