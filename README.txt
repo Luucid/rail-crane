@@ -3,10 +3,19 @@ Dwarf Fortress Steam 53.17 with DFHack 53.17-r1
 
 INSTALL
 Close Dwarf Fortress. In Steam, open Dwarf Fortress > Manage > Browse local
-files. Extract the ZIP into that folder. Let Windows merge its mods and
-dfhack-config folders and replace the Rail Crane scripts. Launch the
-game with DFHack. For a new installation, open Mods on the Create New
-World screen and add Rail Crane before generating.
+files to open the game folder.
+
+Download the Rail-Crane-1.4.2.zip asset from GitHub Releases and extract it
+into the game folder. Let Windows merge the dfhack-config and mods folders
+and replace the Rail Crane scripts.
+
+If you use Code > Download ZIP on the main branch, open the folder inside
+the archive. Copy its dfhack-config and mods folders into the game folder.
+
+The game folder should now contain dfhack-config/scripts/rail-crane.lua
+and mods/rail_crane/info.txt. Launch the game with DFHack. For a new
+installation, open Mods on the Create New World screen and add Rail Crane
+before generating.
 
 To update, close the game, extract over the existing installation,
 and reopen the same save. Built cranes and queued columns persist.
