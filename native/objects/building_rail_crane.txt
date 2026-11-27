@@ -1,0 +1,23 @@
+building_rail_crane
+
+[OBJECT:BUILDING]
+
+[BUILDING_WORKSHOP:RAIL_CRANE]
+    [NAME:Rail Crane]
+    [NAME_COLOR:6:0:1]
+    [DIM:1:1]
+    [WORK_LOCATION:1:1]
+    [BUILD_LABOR:MECHANIC]
+    [BUILD_KEY:NONE]
+    [BLOCK:1:0]
+    [TILE:0:1:207]
+    [COLOR:0:1:6:0:0]
+    [TILE:1:1:207]
+    [COLOR:1:1:6:0:1]
+    [TILE:2:1:207]
+    [COLOR:2:1:6:0:1]
+    [TILE:3:1:207]
+    [COLOR:3:1:6:0:1]
+    [BUILD_ITEM:2:BLOCKS:NONE:NONE:NONE]
+    [BUILD_ITEM:1:TRAPPARTS:NONE:NONE:NONE]
+    [TOOLTIP:Build on a straight, level minecart track. Uses two blocks and one mechanism. Click the finished crane to mark wall columns.]

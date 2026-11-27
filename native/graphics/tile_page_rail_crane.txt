@@ -1,0 +1,8 @@
+tile_page_rail_crane
+
+[OBJECT:TILE_PAGE]
+
+[TILE_PAGE:RAIL_CRANE_MOUNT]
+    [FILE:images/rail_crane_mount.png]
+    [TILE_DIM:32:32]
+    [PAGE_DIM:4:1]
