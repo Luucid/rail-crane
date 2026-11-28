@@ -1,11 +1,11 @@
-CRANE 1.5.4
+CRANE 1.6.1
 Dwarf Fortress Steam 53.17 with DFHack 53.17-r1
 
 INSTALL
 Close Dwarf Fortress. In Steam, open Dwarf Fortress > Manage > Browse local
 files to open the game folder.
 
-Extract Crane-1.5.4.zip into the game folder. Let Windows merge the
+Extract Crane-1.6.1.zip into the game folder. Let Windows merge the
 dfhack-config and mods folders and replace the crane scripts.
 
 If you use Code > Download ZIP on the main branch, open the folder inside
@@ -17,13 +17,8 @@ installation, open Mods on the Create New World screen and add Crane
 before generating.
 
 To update, close the game, extract over the existing installation,
-and reopen the same save. Built cranes and queued columns persist.
-
-The mod list reads the name and version from info.txt. If it still shows
-the previous name or version after extraction, close the game and copy
-mods/rail_crane/info.txt into the existing rail_crane (2) folder under
-data/installed_mods. Steam may keep that folder under %APPDATA%/Bay 12
-Games/Dwarf Fortress instead of the game directory.
+and reopen the same save. Choose Update if Dwarf Fortress offers the
+newer compatible version. Built cranes and queued orders persist.
 
 STEAM WORKSHOP
 Install DFHack on Steam, subscribe to Crane, and launch Dwarf Fortress
@@ -61,8 +56,8 @@ the same time. If you join tracks that both have a crane, both cranes
 pause and keep their queues until you split the tracks or remove one crane.
 
 BUILD WALL COLUMNS
-Click the crane's base, mast, rear platform, or dock and select Build. Move
-the map and change z-levels with your normal controls. Highlighting shows
+Click the crane's base, mast, rear platform, or dock and select Build walls.
+Move the map and change z-levels with your normal controls. Highlighting shows
 the crane's horizontal reach. Click individual column tops, or switch to Outline,
 click corners on one level, and use Close outline to mark the perimeter.
 
@@ -99,13 +94,32 @@ adult civilian dwarf to board and ride to the next stop. The same dwarf can
 prepare blocks and operate the boom. A dedicated worker can use a burrow
 covering the base, rear platform, and any track it uses.
 
+RETRIEVE LOOSE ITEMS
+1. Click the finished crane and choose Retrieve items. Use the usual map
+   and z-level controls to find the objects. Click tiles to mark the loose
+   items on them, including corpses and items on a submerged floor.
+2. Choose Drop tile for one dry floor tile, or Drop area and mark two
+   corners on the same level. The crane remembers the location for the
+   next batch. It prefers the emptiest reachable dry floor in the area.
+   You can include tiles from an existing stockpile in the drop area.
+3. Choose Queue retrieval and unpause. An operator hoists one item at a
+   time. A rolling crane carries its load to the drop stop when needed.
+   Markers clear as pickups finish. If the operator leaves, the crane
+   holds its position and resumes when another dwarf takes the controls.
+   A loaded crane waits for a blocked track or drop tile to clear.
+
+Leave enough room above the items and drop tiles for the hook. A pickup
+from magma requires a magma-safe chain. The crane keeps each item's
+forbidden status. The drop area and unfinished pickups survive save/load.
+
 DISMANTLE
 Use Dismantle crane in its controls to give a dwarf a normal building
 removal job at the dock. The boom stops while the job is pending.
 
 Built walls are part of the fortress. Crane positions, heights, boom angles, block
 choices and queued progress are saved with the site. On reload an interrupted
-lift starts again from block preparation.
+wall lift starts again from block preparation. An interrupted retrieval
+starts again from the marked pickup tile.
 
 If the workshop is built but the crane controls do not appear, check that
 DFHack is running and the crane overlays are enabled in its control

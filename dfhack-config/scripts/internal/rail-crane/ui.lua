@@ -8,6 +8,7 @@ local overlays = require('plugins.overlay')
 local native = reqscript('internal/rail-crane/native')
 local picker = reqscript('internal/rail-crane/picker')
 local rail = reqscript('internal/rail-crane/rail')
+local retrieval = reqscript('internal/rail-crane/retrieval')
 local sprites = reqscript('internal/rail-crane/sprites')
 
 local function xykey(p)
@@ -115,14 +116,28 @@ local function drawHoist(putLayer, pose, crane, origin, offset_x, offset_y, z)
     end
     drawPieces(putRope, anchor, sprites.shift(sprites.layer('rope', at_end, depth, at_sheave), x, y))
     if at_end and pose.load then
-        local block = sprites.layer('block', sprites.blockColor(pose.load.token), depth)
-        drawPieces(putLayer, anchor, sprites.shift(block, x, y))
+        local load
+        if pose.load.cargo then
+            load = sprites.layer('cargo', pose.load.corpse, depth)
+        else
+            load = sprites.layer('block', sprites.blockColor(pose.load.token), depth)
+        end
+        drawPieces(putLayer, anchor, sprites.shift(load, x, y))
     end
 end
 
 local function craneLayers(put, putLayer, api, crane, z)
     for _, target in ipairs(crane.queue) do
         put(target, 'queued')
+    end
+    local marked = {}
+    for _, pickup in ipairs(crane.pickups or {}) do
+        local pos = pickup.pos
+        local key = xykey(pos)
+        if pos.z == z and not marked[key] then
+            put(pos, 'pickup')
+            marked[key] = true
+        end
     end
 
     local pose = api.pose(crane)
@@ -212,6 +227,7 @@ function CraneScreen:setNotice(text)
     self.notice = text
     self.subviews.control_notice:updateLayout()
     self.subviews.build_notice:updateLayout()
+    self.subviews.retrieve_notice:updateLayout()
 end
 
 local function action(frame, label, key, fn, opts)
@@ -245,9 +261,11 @@ function CraneScreen:init()
     self.mark_mode = 'Tiles'
     self.material_mode = 'choose'
     self.keep_building = false
+    self.pickup_marks = {}
     self.notice = ''
     local function control() return self.mode == 'control' end
     local function building() return self.mode == 'build' end
+    local function retrieving() return self.mode == 'retrieve' end
     local function ready()
         local crane = self:crane()
         return crane and not crane.dismantling
@@ -269,10 +287,15 @@ function CraneScreen:init()
             function() self.material_mode = mode end,
             {selected=function() return self.material_mode == mode end, width=33, enabled=enabled})
     end
+    local function pickupChoice(top, key, name, mode)
+        return action({l=0,r=0,t=top}, name, key,
+            function() self:setPickupMode(mode) end,
+            {selected=function() return self.pick_mode == mode end, width=15})
+    end
     self:addviews{
         widgets.Window{
             view_id='control_panel',
-            frame={l=2,t=4,w=44,h=11},
+            frame={l=2,t=4,w=44,h=12},
             frame_style=gui.FRAME_MEDIUM,
             frame_inset={x=1,y=0},
             frame_title='Crane',
@@ -293,9 +316,11 @@ function CraneScreen:init()
                     function() self:beginBuild() end, {enabled=ready, pen=COLOR_LIGHTGREEN}),
                 action({l=23,t=4,w=17}, 'Center', 'CUSTOM_CTRL_J',
                     function() self:centerCrane() end),
-                action({l=0,t=5,w=26}, 'Dismantle crane', 'CUSTOM_CTRL_D',
+                action({l=0,t=5,w=26}, 'Retrieve items', 'CUSTOM_CTRL_E',
+                    function() self:beginRetrieve() end, {enabled=ready, pen=COLOR_LIGHTGREEN}),
+                action({l=0,t=6,w=26}, 'Dismantle crane', 'CUSTOM_CTRL_D',
                     function() self:dismantle() end, {enabled=ready}),
-                notice('control_notice', 6),
+                notice('control_notice', 7),
             },
         },
         widgets.Window{
@@ -342,14 +367,50 @@ function CraneScreen:init()
                 notice('build_notice', 11),
             },
         },
+        widgets.Window{
+            view_id='retrieve_panel',
+            frame={l=2,t=4,w=44,h=16},
+            frame_style=gui.FRAME_MEDIUM,
+            frame_inset={x=1,y=0},
+            frame_title='Retrieve items',
+            draggable=false,
+            visible=retrieving,
+            subviews={
+                widgets.Label{
+                    frame={l=0,r=0,t=0},
+                    text={{text=function() return self:pickupInstruction() end}},
+                    text_pen=COLOR_WHITE,
+                },
+                widgets.Label{
+                    frame={l=0,r=0,t=1},
+                    text={{text=function() return self:pickupSummary() end}},
+                    text_pen=COLOR_YELLOW,
+                },
+                pickupChoice(3, 'CUSTOM_CTRL_P', 'Pickups', 'pickup'),
+                pickupChoice(4, 'CUSTOM_CTRL_T', 'Drop tile', 'drop_tile'),
+                pickupChoice(5, 'CUSTOM_CTRL_L', 'Drop area', 'drop_area'),
+                widgets.Label{
+                    frame={l=0,r=0,t=7},
+                    text={{text=function() return self:dropSummary() end}},
+                    text_pen=COLOR_LIGHTGREEN,
+                },
+                action({l=0,t=9,w=26}, 'Queue retrieval', 'SELECT',
+                    function() self:queuePickups() end,
+                    {enabled=function() return ready() and self:canQueuePickups() end, pen=COLOR_LIGHTGREEN}),
+                action({l=26,t=9,w=14}, 'Clear', 'CUSTOM_CTRL_U',
+                    function() self.pickup_marks = {}; self:setNotice('') end,
+                    {enabled=function() return next(self.pickup_marks) ~= nil end}),
+                notice('retrieve_notice', 11),
+            },
+        },
     }
 end
 
 function CraneScreen:headline()
     local crane = self:crane()
     if not crane then return 'The crane is unavailable.' end
-    return ('Boom z %d  |  %d queued column%s'):format(rail.buildLevel(crane), #crane.queue,
-        #crane.queue == 1 and '' or 's')
+    return ('Boom z %d  |  %d columns  |  %d items'):format(rail.buildLevel(crane), #crane.queue,
+        #(crane.pickups or {}))
 end
 
 function CraneScreen:selectionSize()
@@ -389,11 +450,108 @@ function CraneScreen:beginBuild()
     self:clearDraft()
 end
 
+function CraneScreen:beginRetrieve()
+    self.mode = 'retrieve'
+    self.pickup_marks = {}
+    self:setPickupMode('pickup')
+end
+
+function CraneScreen:setPickupMode(mode)
+    self.pick_mode = mode
+    self.drop_corner = nil
+    self.hover_checked = nil
+    self:setNotice('')
+end
+
+function CraneScreen:pickupInstruction()
+    if self.pick_mode == 'drop_tile' then return 'Click a dry floor to set the drop tile.' end
+    if self.pick_mode == 'drop_area' then
+        return self.drop_corner and 'Click the opposite drop area corner.' or 'Click the first drop area corner.'
+    end
+    return 'Click tiles to mark loose items.'
+end
+
+function CraneScreen:pickupSummary()
+    local tiles, items = 0, 0
+    for _, mark in pairs(self.pickup_marks) do
+        tiles, items = tiles + 1, items + mark.count
+    end
+    return ('%d marked item%s on %d tile%s'):format(items, items == 1 and '' or 's', tiles, tiles == 1 and '' or 's')
+end
+
+function CraneScreen:dropSummary()
+    local crane = self:crane()
+    local zone = crane and crane.drop_zone
+    if not zone then return 'Choose a drop tile or area.' end
+    local w, h = zone.x2 - zone.x1 + 1, zone.y2 - zone.y1 + 1
+    if w == 1 and h == 1 then return 'Drop tile ' .. rail.coordinates({x=zone.x1, y=zone.y1, z=zone.z}) end
+    return ('Drop area %d x %d  |  z %d'):format(w, h, zone.z)
+end
+
+function CraneScreen:markRetrieval(pos)
+    local crane = self:crane()
+    if not crane then return end
+    if self.pick_mode == 'pickup' then
+        local key = rail.coordinates(pos)
+        if self.pickup_marks[key] then
+            self.pickup_marks[key] = nil
+        else
+            local ok, reason, ids = self.api.inspectPickup(crane, pos)
+            if not ok then self:setNotice(reason); return end
+            self.pickup_marks[key] = {pos=pos, count=#ids}
+        end
+        self:setNotice('')
+        return
+    end
+    if self.pick_mode == 'drop_area' and not self.drop_corner then
+        self.drop_corner = pos
+        self:setNotice('')
+        return
+    end
+    local first = self.drop_corner or pos
+    if first.z == pos.z then
+        local zone = retrieval.area(first, pos)
+        for _, mark in pairs(self.pickup_marks) do
+            if retrieval.inArea(mark.pos, zone) then
+                self:setNotice('Keep marked pickups outside the drop area.')
+                return
+            end
+        end
+    end
+    local ok, reason = self.api.setDropZone(crane.id, first, pos)
+    if not ok then self:setNotice(reason); return end
+    self:setPickupMode('pickup')
+end
+
+function CraneScreen:canQueuePickups()
+    local crane = self:crane()
+    return self.pick_mode == 'pickup' and next(self.pickup_marks) ~= nil and crane and crane.drop_zone
+end
+
+function CraneScreen:queuePickups()
+    if not self:canQueuePickups() then return end
+    local positions = {}
+    for _, mark in pairs(self.pickup_marks) do positions[#positions + 1] = mark.pos end
+    table.sort(positions, function(a, b)
+        if a.z ~= b.z then return a.z < b.z end
+        if a.y ~= b.y then return a.y < b.y end
+        return a.x < b.x
+    end)
+    local added, errors = self.api.designatePickups(self.crane_id, positions)
+    for _, pickup in ipairs(self:crane().pickups or {}) do self.pickup_marks[rail.coordinates(pickup.pos)] = nil end
+    if #errors > 0 then
+        self:setNotice(errors[1])
+    elseif added > 0 then
+        self.mode = 'control'
+        self:setNotice('')
+    end
+end
+
 function CraneScreen:dismantle()
     local crane = self:crane()
     if not crane then return end
     dialogs.showYesNoPrompt('Dismantle crane',
-        'Order a dwarf to dismantle this crane and clear its pending columns?', COLOR_YELLOW,
+        'Order a dwarf to dismantle this crane and clear its pending work?', COLOR_YELLOW,
         function()
             local ok, reason = self.api.dismantle(crane.id)
             if ok then
@@ -551,9 +709,38 @@ function CraneScreen:submit(material)
     end
 end
 
+function CraneScreen:drawPickupPreview(put, z, mouse)
+    local crane = self:crane()
+    if not crane then return end
+    local zone = crane.drop_zone
+    if self.drop_corner and mouse and self.drop_corner.z == mouse.z then
+        zone = retrieval.area(self.drop_corner, mouse)
+    end
+    for _, p in ipairs(self:reachable(z)) do
+        put(p, retrieval.inArea(p, zone) and 'drop' or 'reach')
+    end
+    for _, mark in pairs(self.pickup_marks) do put(mark.pos, 'marked') end
+    if self.drop_corner then put(self.drop_corner, 'drop') end
+    if not mouse then return end
+    if self.pick_mode == 'pickup' then
+        local timestamp = dfhack.getTickCount()
+        if not equal(mouse, self.hover_pos) or not self.hover_checked or timestamp - self.hover_checked >= 160 then
+            self.hover_valid = self.pickup_marks[rail.coordinates(mouse)] or self.api.inspectPickup(crane, mouse)
+            self.hover_pos, self.hover_checked = mouse, timestamp
+        end
+        put(mouse, self.hover_valid and 'hovered' or 'invalid')
+    else
+        put(mouse, 'drop')
+    end
+end
+
 function CraneScreen:drawPreview(put, z)
+    if self.mode == 'control' then return end
     local mouse = not self:isMouseOver() and mapMouse() or nil
-    if self.mode ~= 'build' then return end
+    if self.mode == 'retrieve' then
+        self:drawPickupPreview(put, z, mouse)
+        return
+    end
     for _, p in ipairs(self:reachable(z)) do put(p, 'reach') end
     for _, mark in pairs(self.marked) do put(mark.pos, 'marked') end
     for i, p in ipairs(self.vertices) do
@@ -593,6 +780,16 @@ function CraneScreen:onInput(keys)
             self:clearDraft()
             return true
         end
+        if self.mode == 'retrieve' then
+            if self.drop_corner then
+                self.drop_corner = nil
+            else
+                self.mode = 'control'
+                self.pickup_marks = {}
+            end
+            self:setNotice('')
+            return true
+        end
     end
     if keys.SELECT and self.mode == 'build' and #self.vertices > 0 then
         self:closeOutline()
@@ -603,6 +800,8 @@ function CraneScreen:onInput(keys)
         if pos then
             if self.mode == 'build' then
                 if self.mark_mode == 'Tiles' then self:markTile(pos) else self:markVertex(pos) end
+            elseif self.mode == 'retrieve' then
+                self:markRetrieval(pos)
             else
                 local crane = locateCrane(self.api, pos)
                 if crane then self.crane_id = crane.id end

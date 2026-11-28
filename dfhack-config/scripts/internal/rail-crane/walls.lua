@@ -59,7 +59,7 @@ local function blocked(pos, designation, occupancy, magma_safe)
     if dfhack.buildings.findAtTile(pos) then return 'A building blocks this column' end
 end
 
-local function clearance(pos, platform_z, magma_safe)
+function M.clearance(pos, platform_z, magma_safe)
     if pos.z > platform_z then return nil, 'Above the crane platform' end
     for z = pos.z + 1, platform_z do
         local over = at_height(pos, z)
@@ -101,7 +101,7 @@ end
 
 -- Returns the first wall level, leaving the requested top level to the caller.
 function M.inspect(pos, platform_z, magma_safe)
-    local clear, reason = clearance(pos, platform_z, magma_safe)
+    local clear, reason = M.clearance(pos, platform_z, magma_safe)
     if not clear then return nil, reason end
     if M.isWall(pos) then return nil, 'A constructed wall is already at the selected height' end
     for z = pos.z, 0, -1 do

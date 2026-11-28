@@ -275,6 +275,19 @@ local function block(pixels, color, depth)
     return pixels
 end
 
+local function cargo(pixels, corpse, depth)
+    local y = 14 + depth * 4
+    local left, right = corpse and 7 or 10, corpse and 24 or 21
+    line(pixels, 16, y - 2, left + 1, y + 4, 0, hemp)
+    line(pixels, 16, y - 2, right - 1, y + 4, 0, hemp_light)
+    rect(pixels, left, y + 3, right, y + 9, ink)
+    rect(pixels, left + 1, y + 4, right - 1, y + 8, hemp_dark)
+    rect(pixels, left + 2, y + 4, right - 2, y + 6, hemp)
+    rect(pixels, 12, y + 3, 13, y + 9, wood_dark)
+    rect(pixels, 18, y + 3, 19, y + 9, wood_dark)
+    return pixels
+end
+
 local function brackets(pixels, color, size)
     for _, corner in ipairs{{1, 1, 1, 1}, {30, 1, -1, 1}, {1, 30, 1, -1}, {30, 30, -1, -1}} do
         local x, y, dx, dy = table.unpack(corner)
@@ -295,9 +308,12 @@ end
 
 local artists = {
     chassis=chassis, foundation=foundation, mast=mast, prep=prep_deck, dock=dock, hub=hub, rope=rope, block=block,
+    cargo=cargo,
     menu_crane=menu_crane,
     reach=function(pixels) return brackets(pixels, rgba(81, 183, 168, 130), 4) end,
     queued=function(pixels) return waypoint(pixels, rgba(233, 175, 71)) end,
+    pickup=function(pixels) return waypoint(pixels, rgba(120, 220, 238)) end,
+    drop=function(pixels) return brackets(pixels, rgba(193, 171, 255), 8) end,
     marked=function(pixels) return waypoint(pixels, rgba(128, 234, 116)) end,
     hovered=function(pixels) return brackets(pixels, rgba(219, 250, 171), 12) end,
     invalid=function(pixels) return brackets(pixels, rgba(255, 106, 93), 12) end,
@@ -309,8 +325,9 @@ local fallback = {
     menu_crane={'C', COLOR_BROWN},
     foundation={'#', COLOR_BROWN}, mast={'H', COLOR_BROWN},
     boom={'-', COLOR_BROWN},
-    rope={'|', COLOR_BROWN}, block={254, COLOR_WHITE}, reach={250, COLOR_CYAN},
+    rope={'|', COLOR_BROWN}, block={254, COLOR_WHITE}, cargo={'s', COLOR_BROWN}, reach={250, COLOR_CYAN},
     queued={'x', COLOR_YELLOW}, marked={'X', COLOR_LIGHTGREEN},
+    pickup={'x', COLOR_LIGHTCYAN}, drop={'#', COLOR_LIGHTMAGENTA},
     hovered={'+', COLOR_WHITE}, invalid={'!', COLOR_LIGHTRED}, track={'+', COLOR_LIGHTCYAN},
 }
 

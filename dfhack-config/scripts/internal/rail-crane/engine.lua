@@ -4,6 +4,7 @@ local rail = reqscript('internal/rail-crane/rail')
 local walls = reqscript('internal/rail-crane/walls')
 local workers = reqscript('internal/rail-crane/workers')
 local native = reqscript('internal/rail-crane/native')
+local retrieval = reqscript('internal/rail-crane/retrieval')
 
 local SITE_KEY = 'rail-crane/v1'
 local UPDATE_TICKS = 3
@@ -48,15 +49,24 @@ local function reset(crane, status, retry)
         crane.reservation = nil
         persist()
     end
+    if crane.pickup_reservation then
+        retrieval.release(crane.pickup_reservation)
+        crane.pickup_reservation = nil
+        persist()
+    end
     running[crane.id] = retry and {retry=now() + RETRY_TICKS} or nil
     crane.status = status
+end
+
+local function hasWork(crane)
+    return #crane.queue > 0 or (crane.pickups and #crane.pickups > 0)
 end
 
 local function standbyStatus(crane)
     if crane.dismantling then return 'Waiting for a dwarf to dismantle the crane' end
     if not state.enabled then return 'Paused' end
     if crane.track_conflict then return SHARED_TRACK_STATUS end
-    return #crane.queue > 0 and 'Queued' or 'Ready'
+    return hasWork(crane) and 'Queued' or 'Ready'
 end
 
 local function platformsOverlap(tiles, deck, ceiling, other)
@@ -230,10 +240,10 @@ local function syncWorkshops()
     if syncTracks(pending) or changed then persist() end
 end
 
-local function removeColumn(crane, column)
-    for i, queued in ipairs(crane.queue) do
-        if queued == column then
-            table.remove(crane.queue, i)
+local function removeEntry(queue, entry)
+    for i, queued in ipairs(queue) do
+        if queued == entry then
+            table.remove(queue, i)
             return
         end
     end
@@ -261,6 +271,7 @@ local function phase(run, name, duration)
     run.phase = name
     run.start = now()
     run.duration = duration
+    run.try_at = nil
 end
 
 local function waitForWorker(crane, run, pos, preferred, nextPhase, duration, description)
@@ -271,14 +282,123 @@ local function waitForWorker(crane, run, pos, preferred, nextPhase, duration, de
         return
     end
     crane.status = description
-    if now() - run.start > 480 then reset(crane, description, true) end
+    if not run.lifted and now() - run.start > 480 then reset(crane, description, true) end
+end
+
+local function retrievalOperatorReady(crane, run, station, boarding)
+    local ready = boarding and workers.board or workers.arrived
+    local tick = now()
+    if run.worker and ready(run.worker, station) then
+        if run.operator_wait then
+            run.start = run.start + tick - run.operator_wait
+            run.operator_wait = nil
+        end
+        return true
+    end
+    if run.worker and not workers.active(run.worker, station) then releaseWorker(run) end
+    run.operator_wait = run.operator_wait or tick
+    if not run.worker and tick >= (run.next_operator_check or 0) then
+        run.worker = workers.acquire(station, crane.last_worker)
+        run.next_operator_check = tick + RETRY_TICKS
+    end
+    if run.lifted then
+        crane.status = 'Holding the item until a dwarf returns'
+    elseif boarding then
+        crane.status = 'Waiting for a dwarf to board the crane'
+    else
+        crane.status = 'Waiting for a dwarf to resume the lift'
+    end
+    return false
+end
+
+local function retrievalStop(crane, pos, magma_safe, drop)
+    local ok, reason = retrieval.access(pos, rail.buildLevel(crane), magma_safe, drop)
+    if not ok then return nil, nil, reason end
+    local key = rail.xykey(pos)
+    for _, other in ipairs(state.cranes) do
+        if pos.z >= other.rail[1].z and pos.z <= rail.buildLevel(other) and rail.footprint(other)[key] then
+            return nil, nil, 'A crane platform occupies this tile.'
+        end
+        if drop then
+            for _, column in ipairs(other.queue) do
+                if pos.z >= column.next_z and pos.z <= column.z and rail.xykey(column) == key then
+                    return nil, nil, 'A wall is queued on this tile.'
+                end
+            end
+        end
+    end
+    local stop, step = rail.stopFor(crane, pos)
+    if not stop then return nil, nil, 'Out of reach or the boom path is blocked.' end
+    return stop, step
+end
+
+local function dropFor(crane, zone, magma_safe, setting)
+    if not zone then return end
+    local pivot = crane.rail[crane.index]
+    local best, bestStop, bestStep, bestCount, bestDistance
+    for _, pos in ipairs(rail.reachable(crane, zone.z)) do
+        if retrieval.inArea(pos, zone) then
+            local _, occ = dfhack.maps.getTileFlags(pos)
+            if setting or (occ and not occ.unit and not occ.unit_grounded) then
+                local count = retrieval.countGround(pos)
+                local distance = (pos.x-pivot.x)^2 + (pos.y-pivot.y)^2
+                if not best or count < bestCount or (count == bestCount and distance < bestDistance) then
+                    local stop, step = retrievalStop(crane, pos, magma_safe, true)
+                    if stop then
+                        if setting then return pos end
+                        best, bestStop, bestStep, bestCount, bestDistance = pos, stop, step, count, distance
+                    end
+                end
+            end
+        end
+    end
+    return best, bestStop, bestStep
+end
+
+local function startRun(crane, run)
+    running[crane.id] = run
+    phase(run, 'park', 0)
+    persist()
+end
+
+local function nextRetrieval(crane, magma_safe)
+    local pickups = crane.pickups
+    if not pickups or #pickups == 0 then return end
+    local drop = dropFor(crane, crane.drop_zone, magma_safe)
+    local waiting
+    local i = 1
+    while i <= #pickups do
+        local pickup = pickups[i]
+        local item = retrieval.atSource(pickup)
+        if not item then
+            table.remove(pickups, i)
+            persist()
+        else
+            if not drop then
+                waiting = 'Waiting for a clear drop area'
+            else
+                local stop, step, reason = retrievalStop(crane, pickup.pos, magma_safe)
+                if stop and retrieval.reserve(item) then
+                    crane.pickup_reservation = pickup.item_id
+                    local kind = item:getType()
+                    startRun(crane, {pickup=pickup, target=drop, stop=stop, step=step, magma_safe=magma_safe,
+                        corpse=kind == df.item_type.CORPSE or kind == df.item_type.CORPSEPIECE})
+                    return true
+                end
+                waiting = waiting or reason or 'Waiting for the item to become available'
+            end
+            i = i + 1
+        end
+    end
+    return false, waiting
 end
 
 local function nextWork(crane)
-    local waiting
+    local magma_safe = native.hasMagmaSafeChain(crane.building_id)
+    local started, waiting = nextRetrieval(crane, magma_safe)
+    if started then return end
     local empty = {}
     local i = 1
-    local magma_safe = native.hasMagmaSafeChain(crane.building_id)
     local platform_z = rail.buildLevel(crane)
     while i <= #crane.queue do
         local column = crane.queue[i]
@@ -303,10 +423,7 @@ local function nextWork(crane)
                 local item_id = walls.reserve(column.material, rear)
                 if item_id then
                     crane.reservation = item_id
-                    local run = {column=column, target=target, stop=stop, step=step, magma_safe=magma_safe}
-                    running[crane.id] = run
-                    phase(run, 'park', 0)
-                    persist()
+                    startRun(crane, {column=column, target=target, stop=stop, step=step, magma_safe=magma_safe})
                     return
                 end
                 empty[column.material] = true
@@ -315,61 +432,98 @@ local function nextWork(crane)
             i = i + 1
         end
     end
-    reset(crane, waiting or 'Ready', #crane.queue > 0)
+    reset(crane, waiting or 'Ready', hasWork(crane))
+end
+
+local function finishHoist(crane, run)
+    if not run.pickup then
+        phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER)
+        return
+    end
+    local drop, stop, step = dropFor(crane, crane.drop_zone, run.magma_safe)
+    if not drop then
+        crane.status = 'Holding the item until the drop area clears'
+        run.try_at = now() + RETRY_TICKS
+        return
+    end
+    run.target, run.stop, run.step = drop, stop, step
+    if stop == crane.index then
+        phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER)
+    else
+        phase(run, 'stow', 18)
+    end
 end
 
 local function updateCrane(crane)
     local run = running[crane.id]
     if not run or run.retry then
-        if #crane.queue == 0 then return end
+        if not hasWork(crane) then return end
         if not run or now() >= run.retry then nextWork(crane) end
         return
     end
 
     local currentPhase = run.phase
-    local done = now() >= run.start + run.duration
+    local done = (run.operator_wait or now()) >= run.start + run.duration
     local operator, rear = rail.stations(crane, crane.index)
     local boom = rail.boomPosition(crane, crane.index)
+    local source = run.pickup and run.pickup.pos or rear
     if not rail.stopValid(crane, crane.index) then
         reset(crane, 'Waiting for the crane base and rear platform to clear', true)
         return
     end
-    if not run.placed and not walls.resolve(crane.reservation, run.column.material) then
-        reset(crane, 'Reserved block became unavailable', true)
-        return
-    end
-    if run.worker and not run.placed then
-        local station = (currentPhase == 'prep' or currentPhase == 'wait_prep') and rear or operator
-        if currentPhase ~= 'wait_prep' and currentPhase ~= 'wait_operator' and currentPhase ~= 'wait_driver'
-            and (not workers.active(run.worker, station) or not workers.arrived(run.worker, station)) then
-            reset(crane, 'Worker left the station', #crane.queue > 0)
+    if not run.placed then
+        if run.pickup then
+            if not retrieval.resolve(run.pickup) then
+                reset(crane, 'The pickup item became unavailable', true)
+                return
+            end
+        elseif not walls.resolve(crane.reservation, run.column.material) then
+            reset(crane, 'Reserved block became unavailable', true)
             return
         end
     end
-
     local lowering = (currentPhase == 'swing_target' and done) or currentPhase == 'lower' or currentPhase == 'release'
-    if lowering and not run.magma_safe then
-        local ok, reason = walls.checkMagma(run.target, boom.z)
+    local picking = run.pickup and ((currentPhase == 'swing_rear' and done) or currentPhase == 'lower_rear'
+        or currentPhase == 'pickup' or currentPhase == 'hoist')
+    if (lowering or picking) and not run.magma_safe then
+        local ok, reason = walls.checkMagma(picking and source or run.target, boom.z)
         if not ok then
             reset(crane, reason, true)
             return
         end
     end
 
+    if run.try_at and now() < run.try_at then return end
+    local waiting = currentPhase == 'wait_prep' or currentPhase == 'wait_operator'
+        or currentPhase == 'wait_driver' or currentPhase == 'wait_drop'
+    if not run.placed and not waiting then
+        if run.pickup and (run.worker or run.operator_wait) then
+            local boarding = currentPhase == 'travel' or (currentPhase == 'park' and crane.index ~= run.stop)
+            if not retrievalOperatorReady(crane, run, operator, boarding) then return end
+        elseif run.worker and not workers.arrived(run.worker, currentPhase == 'prep' and rear or operator) then
+            reset(crane, 'Worker left the station', hasWork(crane))
+            return
+        end
+    end
+
     if currentPhase == 'park' then
         if crane.index == run.stop then
-            if run.worker then
-                crane.last_worker = run.worker
-                releaseWorker(run)
+            if run.pickup then
+                phase(run, run.lifted and 'wait_drop' or 'wait_operator', 0)
+            else
+                if run.worker then
+                    crane.last_worker = run.worker
+                    releaseWorker(run)
+                end
+                phase(run, 'wait_prep', 0)
             end
-            phase(run, 'wait_prep', 0)
             return
         end
         if not run.worker then
             phase(run, 'wait_driver', 0)
             return
         end
-        if not workers.board(run.worker, operator) then
+        if not run.pickup and not workers.board(run.worker, operator) then
             reset(crane, 'Waiting for a dwarf to board the crane', true)
             return
         end
@@ -379,7 +533,11 @@ local function updateCrane(crane)
             return
         end
         phase(run, 'travel', 9)
-        crane.status = 'Rolling to column ' .. rail.coordinates(run.column)
+        if run.pickup then
+            crane.status = run.lifted and 'Rolling to the drop area' or 'Rolling to the pickup'
+        else
+            crane.status = 'Rolling to column ' .. rail.coordinates(run.column)
+        end
     elseif currentPhase == 'wait_driver' then
         waitForWorker(crane, run, operator, crane.last_worker, 'park', 0, 'Waiting for a dwarf to board the crane')
     elseif currentPhase == 'travel' and done then
@@ -389,7 +547,14 @@ local function updateCrane(crane)
         end
         local ok, reason = workers.ride(run.worker, crane.rail[run.next_index], crane.building_id)
         if not ok then
-            reset(crane, reason or 'Waiting for the track ahead to clear', true)
+            local status = reason or 'Waiting for the track ahead to clear'
+            if run.pickup and run.lifted then
+                phase(run, 'park', 0)
+                run.try_at = now() + RETRY_TICKS
+                crane.status = status
+            else
+                reset(crane, status, true)
+            end
             return
         end
         crane.index = run.next_index
@@ -415,65 +580,98 @@ local function updateCrane(crane)
         waitForWorker(crane, run, operator, run.preparer, 'swing_rear', 12 * BLOCK_WORK_MULTIPLIER,
             'Waiting for a dwarf at the controls')
     elseif currentPhase == 'wait_operator' then
-        waitForWorker(crane, run, operator, run.preparer, 'swing_rear', 12 * BLOCK_WORK_MULTIPLIER,
+        waitForWorker(crane, run, operator, run.preparer or crane.last_worker, 'swing_rear', 12 * BLOCK_WORK_MULTIPLIER,
             'Waiting for a dwarf at the controls')
+    elseif currentPhase == 'wait_drop' then
+        waitForWorker(crane, run, operator, crane.last_worker, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER,
+            'Waiting for a dwarf to unload')
     elseif currentPhase == 'swing_rear' then
-        crane.status = 'Swinging to the rear platform'
+        crane.status = run.pickup and 'Swinging to the pickup tile' or 'Swinging to the rear platform'
         if done then
-            if boom.z > rear.z then
-                phase(run, 'lower_rear', cableTicks(boom, rear))
+            if run.pickup and not rail.boomClear(boom, source) then
+                reset(crane, 'Waiting for a clear path to the pickup', true)
+                return
+            end
+            if boom.z > source.z then
+                phase(run, 'lower_rear', cableTicks(boom, source))
             else
                 phase(run, 'pickup', 9 * BLOCK_WORK_MULTIPLIER)
             end
         end
     elseif currentPhase == 'lower_rear' then
-        crane.status = 'Lowering the hook to the rear platform'
+        crane.status = run.pickup and 'Lowering the hook' or 'Lowering the hook to the rear platform'
         if done then phase(run, 'pickup', 9 * BLOCK_WORK_MULTIPLIER) end
     elseif currentPhase == 'pickup' then
-        crane.status = 'Picking up the block'
+        crane.status = run.pickup and 'Picking up the item' or 'Picking up the block'
         if not run.lifted then
-            local ok, reason = walls.lift(crane.reservation, run.column.material)
+            local ok, reason
+            if run.pickup then
+                ok, reason = retrieval.lift(run.pickup, boom.z, run.magma_safe)
+            else
+                ok, reason = walls.lift(crane.reservation, run.column.material)
+            end
             if not ok then
-                reset(crane, reason or 'Could not pick up the reserved block', true)
+                reset(crane, reason or 'Could not pick up the reserved load', true)
                 return
             end
             run.lifted = true
         end
         if done then
-            if boom.z > rear.z then
-                phase(run, 'hoist', cableTicks(boom, rear))
+            if boom.z > source.z then
+                phase(run, 'hoist', cableTicks(boom, source))
             else
-                phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER)
+                finishHoist(crane, run)
             end
         end
     elseif currentPhase == 'hoist' then
-        crane.status = 'Hoisting the block'
-        if done then phase(run, 'swing_target', 18 * BLOCK_WORK_MULTIPLIER) end
+        crane.status = run.pickup and 'Hoisting the item' or 'Hoisting the block'
+        if done then finishHoist(crane, run) end
+    elseif currentPhase == 'stow' then
+        crane.status = 'Bringing the load in for travel'
+        if done then
+            run.stowed = true
+            phase(run, 'park', 0)
+        end
     elseif currentPhase == 'swing_target' then
-        crane.status = 'Swinging to the column'
+        crane.status = run.pickup and 'Swinging to the drop area' or 'Swinging to the column'
         if done then phase(run, 'lower', cableTicks(boom, run.target)) end
     elseif currentPhase == 'lower' then
-        crane.status = 'Lowering the block'
+        crane.status = run.pickup and 'Lowering the item' or 'Lowering the block'
         if done then phase(run, 'release', 6 * BLOCK_WORK_MULTIPLIER) end
     elseif currentPhase == 'release' then
-        crane.status = 'Setting the wall block'
+        crane.status = run.pickup and 'Putting the item down' or 'Setting the wall block'
         if not done then return end
         if not rail.boomClear(boom, run.target) then
             reset(crane, 'Waiting for the overhead path to clear', true)
             return
         end
-        local ok, reason = walls.place(run.target, crane.reservation, run.column.material, boom.z,
-            native.hasMagmaSafeChain(crane.building_id))
+        local magma_safe = native.hasMagmaSafeChain(crane.building_id)
+        local ok, reason, wait
+        if run.pickup then
+            ok, reason, wait = retrieval.place(run.pickup, run.target, boom.z, magma_safe)
+        else
+            ok, reason = walls.place(run.target, crane.reservation, run.column.material, boom.z, magma_safe)
+        end
         if not ok then
-            reset(crane, reason or 'Wall placement blocked', true)
+            if wait then
+                crane.status = reason
+                run.try_at = now() + RETRY_TICKS
+            else
+                reset(crane, reason or 'The load could not be put down', true)
+            end
             return
         end
-        crane.reservation = nil
+        if run.pickup then
+            crane.pickup_reservation = nil
+            removeEntry(crane.pickups, run.pickup)
+        else
+            crane.reservation = nil
+            run.column.next_z = run.target.z + 1
+            if run.column.next_z > run.column.z then removeEntry(crane.queue, run.column) end
+        end
         crane.last_worker = run.worker
         crane.boom_angle = bearing(operator, run.target)
         run.placed = true
-        run.column.next_z = run.target.z + 1
-        if run.column.next_z > run.column.z then removeColumn(crane, run.column) end
         persist()
         crane.status = 'Rewinding'
         phase(run, 'rewind', cableTicks(boom, run.target))
@@ -596,9 +794,85 @@ function api.cancel(id)
     local crane = find(id)
     if not crane then return false end
     crane.queue = {}
+    crane.pickups = nil
     reset(crane, standbyStatus(crane))
     persist()
     return true
+end
+
+local function queuedItems()
+    local queued = {}
+    for _, crane in ipairs(state.cranes) do
+        for _, pickup in ipairs(crane.pickups or {}) do queued[pickup.item_id] = true end
+    end
+    return queued
+end
+
+function api.inspectPickup(crane, pos, queued)
+    if crane.dismantling then return nil, 'The crane is marked for dismantling.' end
+    if crane.track_conflict then return nil, SHARED_TRACK_STATUS end
+    if retrieval.inArea(pos, crane.drop_zone) then return nil, 'Choose a pickup outside the drop area.' end
+    local stop, _, reason = retrievalStop(crane, pos, native.hasMagmaSafeChain(crane.building_id))
+    if not stop then return nil, reason end
+    queued = queued or queuedItems()
+    local ids = {}
+    for _, id in ipairs(retrieval.itemsAt(pos)) do
+        if not queued[id] then ids[#ids + 1] = id end
+    end
+    if #ids == 0 then return nil, 'No loose items are available on this tile.' end
+    return true, nil, ids
+end
+
+function api.setDropZone(id, a, b)
+    restore()
+    local crane = find(id)
+    if not crane or crane.dismantling then return nil, 'Crane is unavailable.' end
+    if crane.track_conflict then return nil, SHARED_TRACK_STATUS end
+    if a.z ~= b.z then return nil, 'Choose both corners on the same z-level.' end
+    if not (dfhack.maps.isValidTilePos(a) and dfhack.maps.isValidTilePos(b)) then
+        return nil, 'Choose a drop area within the map.'
+    end
+    local zone = retrieval.area(a, b)
+    if not dropFor(crane, zone, native.hasMagmaSafeChain(crane.building_id), true) then
+        return nil, 'Choose a drop area with a reachable, clear, dry floor.'
+    end
+    for _, pickup in ipairs(crane.pickups or {}) do
+        if retrieval.inArea(pickup.pos, zone) then return nil, 'A queued pickup is inside this drop area.' end
+    end
+    local run = running[crane.id]
+    crane.drop_zone = zone
+    if run and (run.retry or (run.pickup and not run.placed)) then reset(crane, standbyStatus(crane)) end
+    persist()
+    return true
+end
+
+function api.designatePickups(id, positions)
+    restore()
+    local crane = find(id)
+    if not crane or crane.dismantling then return 0, {'Crane is unavailable.'} end
+    if crane.track_conflict then return 0, {SHARED_TRACK_STATUS} end
+    if not crane.drop_zone then return 0, {'Set a drop tile or area first.'} end
+    local queued = queuedItems()
+    local added, errors = 0, {}
+    crane.pickups = crane.pickups or {}
+    for _, pos in ipairs(positions) do
+        local ok, reason, ids = api.inspectPickup(crane, pos, queued)
+        if ok then
+            for _, id in ipairs(ids) do
+                crane.pickups[#crane.pickups + 1] = {pos={x=pos.x, y=pos.y, z=pos.z}, item_id=id}
+                queued[id] = true
+                added = added + 1
+            end
+        else
+            errors[#errors + 1] = rail.coordinates(pos) .. ' ' .. reason
+        end
+    end
+    if added > 0 then
+        local run = running[crane.id]
+        if not run or run.retry then reset(crane, standbyStatus(crane)) end
+        persist()
+    end
+    return added, errors
 end
 
 function api.inspect(crane, pos)
@@ -653,6 +927,18 @@ function api.designate(id, positions, token)
     return added, errors
 end
 
+local function drawCable(pose, run, z)
+    pose.cable = {
+        x=pose.operator.x + math.cos(pose.angle) * pose.extension,
+        y=pose.operator.y + math.sin(pose.angle) * pose.extension,
+        z=z,
+    }
+    if run.lifted and not run.placed then
+        pose.load = {x=pose.cable.x, y=pose.cable.y, z=z, token=run.column and run.column.material,
+            cargo=run.pickup ~= nil, corpse=run.corpse}
+    end
+end
+
 function api.pose(crane)
     local operator, rear = rail.stations(crane, crane.index)
     local boom = rail.boomPosition(crane, crane.index)
@@ -662,7 +948,8 @@ function api.pose(crane)
     local run = running[crane.id]
     if not run or run.retry then return pose end
     local name = run.phase
-    local t = run.duration > 0 and math.min(1, (now() - run.start) / run.duration) or 0
+    local elapsed = (run.operator_wait or now()) - run.start
+    local t = run.duration > 0 and math.min(1, elapsed / run.duration) or 0
     pose.phase, pose.progress = name, t
     if run.staged and not run.lifted then
         pose.prepared = {x=rear.x, y=rear.y, z=rear.z, token=run.column.material}
@@ -674,26 +961,36 @@ function api.pose(crane)
         pose.rear = {x=interpolate(rear.x, nextRear.x, t), y=interpolate(rear.y, nextRear.y, t), z=rear.z}
         pose.operator = {x=x, y=y, z=operator.z}
         if t >= 0.5 then pose.north_south = nextOperator.x == nextRear.x end
+        if run.stowed then
+            pose.angle, pose.extension = bearing(pose.operator, pose.rear)
+            drawCable(pose, run, boom.z)
+        end
         return pose
     end
 
-    local rearAngle = bearing(operator, rear)
+    local source = run.pickup and run.pickup.pos or rear
+    local sourceAngle, sourceReach = bearing(operator, source)
+    local rearAngle, rearReach = bearing(operator, rear)
     local targetAngle, reach = bearing(operator, run.target)
     local cableZ = boom.z
     if name == 'swing_rear' then
-        pose.angle = turn(angle, rearAngle, t)
+        pose.angle = turn(angle, sourceAngle, t)
+        pose.extension = interpolate(1, sourceReach, t)
     elseif name == 'lower_rear' or name == 'pickup' or name == 'hoist' then
-        pose.angle = rearAngle
+        pose.angle, pose.extension = sourceAngle, sourceReach
         if name == 'lower_rear' then
-            cableZ = interpolate(boom.z, rear.z, t)
+            cableZ = interpolate(boom.z, source.z, t)
         elseif name == 'hoist' then
-            cableZ = interpolate(rear.z, boom.z, t)
+            cableZ = interpolate(source.z, boom.z, t)
         else
-            cableZ = rear.z
+            cableZ = source.z
         end
+    elseif name == 'stow' then
+        pose.angle = turn(sourceAngle, rearAngle, t)
+        pose.extension = interpolate(sourceReach, rearReach, t)
     elseif name == 'swing_target' then
-        pose.angle = turn(rearAngle, targetAngle, t)
-        pose.extension = interpolate(1, reach, t)
+        pose.angle = turn(run.stowed and rearAngle or sourceAngle, targetAngle, t)
+        pose.extension = interpolate(run.stowed and rearReach or sourceReach, reach, t)
     elseif name == 'lower' or name == 'release' then
         pose.angle, pose.extension = targetAngle, reach
         local depth = name == 'lower' and t or 1
@@ -704,17 +1001,12 @@ function api.pose(crane)
         local folded = math.max(0, t * 3 - 2)
         cableZ = interpolate(run.target.z, boom.z, wound)
         pose.extension = interpolate(reach, 1, folded)
+    elseif run.stowed then
+        pose.angle, pose.extension = rearAngle, rearReach
     else
         return pose
     end
-    pose.cable = {
-        x=operator.x + math.cos(pose.angle) * pose.extension,
-        y=operator.y + math.sin(pose.angle) * pose.extension,
-        z=cableZ,
-    }
-    if run.lifted and not run.placed then
-        pose.load = {x=pose.cable.x, y=pose.cable.y, z=pose.cable.z, token=run.column.material}
-    end
+    drawCable(pose, run, cableZ)
     return pose
 end
 

@@ -1,4 +1,4 @@
--- Ground and rail cranes for block-wall columns
+-- Ground and rail cranes for block-wall columns and item retrieval
 --@ module = true
 --@ enable = true
 
@@ -15,6 +15,8 @@ Magma lifts require an installed magma-safe chain.
 Choose Crane under Build > Machines/Fluids and set its boom height.
 Once a dwarf has built it, click the crane base, mast, or dock, choose Build,
 and mark the tops of the columns. The crane runs when unpaused.
+Choose Retrieve items to pick up loose items or corpses from land or water.
+Mark the pickup tiles and choose a dry drop tile or area.
 
 Use `rail-crane list` to see each crane's position and status,
 `rail-crane cancel ID` to discard its pending designations, and
@@ -45,7 +47,8 @@ elseif command == 'place' then
     qerror('Choose Crane under Build > Machines/Fluids and place it on a dry floor or level track.')
 elseif command == 'list' then
     for _, crane in ipairs(api.list()) do
-        print(('#%d %s | %d columns | %s'):format(crane.id, rail.coordinates(crane.rail[crane.index]), #crane.queue, crane.status))
+        print(('#%d %s | %d columns | %d pickups | %s'):format(
+            crane.id, rail.coordinates(crane.rail[crane.index]), #crane.queue, #(crane.pickups or {}), crane.status))
     end
 elseif command == 'cancel' then
     if not api.cancel(args[2]) then qerror('No crane with that ID.') end
