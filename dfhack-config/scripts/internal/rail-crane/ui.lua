@@ -275,7 +275,7 @@ function CraneScreen:init()
             frame={l=2,t=4,w=44,h=11},
             frame_style=gui.FRAME_MEDIUM,
             frame_inset={x=1,y=0},
-            frame_title='Rail crane',
+            frame_title='Crane',
             draggable=false,
             visible=control,
             subviews={
@@ -392,7 +392,7 @@ end
 function CraneScreen:dismantle()
     local crane = self:crane()
     if not crane then return end
-    dialogs.showYesNoPrompt('Dismantle rail crane',
+    dialogs.showYesNoPrompt('Dismantle crane',
         'Order a dwarf to dismantle this crane and clear its pending columns?', COLOR_YELLOW,
         function()
             local ok, reason = self.api.dismantle(crane.id)
@@ -624,8 +624,8 @@ function show(api, crane_id)
     local crane = lookup(api.list(), crane_id)
     if not crane then
         local message = crane_id and 'No crane with that ID.'
-            or 'Construct a Rail Crane on a minecart track from the Machines/Fluids build menu.'
-        dialogs.showMessage('Rail crane', message, COLOR_LIGHTRED)
+            or 'Build a crane from Machines/Fluids.'
+        dialogs.showMessage('Crane', message, COLOR_LIGHTRED)
         return
     end
     if active_screen and not active_screen:isDismissed() then
@@ -682,7 +682,7 @@ end
 function overlay(api)
     local CraneOverlay = defclass(nil, overlays.OverlayWidget)
     CraneOverlay.ATTRS{
-        desc='Displays the rail crane and opens its controls when clicked.',
+        desc='Displays the crane and opens its controls when clicked.',
         default_enabled=true,
         fullscreen=true,
         viewscreens={'dwarfmode'},

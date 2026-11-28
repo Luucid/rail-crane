@@ -199,6 +199,43 @@ local function hub(pixels)
     return pixels
 end
 
+local function menu_crane(pixels)
+    -- Timber frame and treadle platform.
+    rect(pixels, 2, 24, 19, 28, ink)
+    rect(pixels, 3, 24, 18, 26, wood_face)
+    rect(pixels, 3, 24, 18, 24, wood_light)
+    rect(pixels, 4, 27, 17, 27, metal)
+    line(pixels, 10, 12, 5, 23, 1, ink)
+    line(pixels, 10, 12, 5, 23, 0, wood_face)
+    line(pixels, 11, 18, 19, 9, 1, ink)
+    line(pixels, 11, 18, 19, 9, 0, wood_light)
+    rect(pixels, 8, 11, 12, 24, ink)
+    rect(pixels, 9, 12, 11, 23, wood)
+    rect(pixels, 9, 14, 9, 23, wood_light)
+    rect(pixels, 9, 21, 11, 22, metal_dark)
+
+    -- Rope and stone hanging from the lifting end.
+    rect(pixels, 25, 6, 26, 20, hemp_dark)
+    rect(pixels, 25, 6, 25, 20, hemp_light)
+    rect(pixels, 21, 20, 30, 26, ink)
+    rect(pixels, 22, 21, 29, 24, stone)
+    rect(pixels, 22, 20, 29, 21, stone_light)
+    rect(pixels, 27, 22, 29, 25, stone_dark)
+    rect(pixels, 25, 20, 25, 24, hemp)
+
+    line(pixels, 5, 14, 26, 5, 2, ink)
+    line(pixels, 5, 14, 26, 5, 1, wood)
+    line(pixels, 5, 13, 26, 4, 0, wood_light)
+    rect(pixels, 3, 13, 7, 17, ink)
+    rect(pixels, 4, 14, 6, 16, stone)
+    pixel(pixels, 4, 14, stone_light)
+    disc(pixels, 10, 12, 2, metal_dark)
+    pixel(pixels, 10, 12, pin)
+    disc(pixels, 26, 5, 2, ink)
+    disc(pixels, 26, 5, 1, metal_light)
+    return pixels
+end
+
 local function rope(pixels, is_end, depth, at_sheave)
     local start = at_sheave and CENTER or 0
     local base = is_end and math.max(start + 1, 10 + depth * 4) or SIZE - 1
@@ -258,6 +295,7 @@ end
 
 local artists = {
     chassis=chassis, foundation=foundation, mast=mast, prep=prep_deck, dock=dock, hub=hub, rope=rope, block=block,
+    menu_crane=menu_crane,
     reach=function(pixels) return brackets(pixels, rgba(81, 183, 168, 130), 4) end,
     queued=function(pixels) return waypoint(pixels, rgba(233, 175, 71)) end,
     marked=function(pixels) return waypoint(pixels, rgba(128, 234, 116)) end,
@@ -268,6 +306,7 @@ local artists = {
 
 local fallback = {
     chassis={'#', COLOR_BROWN}, prep={'=', COLOR_BROWN}, dock={'=', COLOR_GREY}, hub={'O', COLOR_GREY},
+    menu_crane={'C', COLOR_BROWN},
     foundation={'#', COLOR_BROWN}, mast={'H', COLOR_BROWN},
     boom={'-', COLOR_BROWN},
     rope={'|', COLOR_BROWN}, block={254, COLOR_WHITE}, reach={250, COLOR_CYAN},

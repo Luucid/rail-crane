@@ -10,8 +10,9 @@ Build a stationary crane on dry ground or a rolling crane on level
 minecart track, including bends and loops. Raise the boom with extra logs
 to build taller walls.
 The crane uses fortress blocks to build ordinary walls bottom-up.
+Magma lifts require an installed magma-safe chain.
 
-Order a Rail Crane from Build > Machines/Fluids and choose its boom height.
+Choose Crane under Build > Machines/Fluids and set its boom height.
 Once a dwarf has built it, click the crane base, mast, or dock, choose Build,
 and mark the tops of the columns. The crane runs when unpaused.
 
@@ -41,7 +42,7 @@ if not command or command == 'gui' then
     if not engine.isAvailable() then qerror('Load a fortress first.') end
     ui.show(api, tonumber(args[2]))
 elseif command == 'place' then
-    qerror('Place a Rail Crane from Build > Machines/Fluids on a dry floor or level track.')
+    qerror('Choose Crane under Build > Machines/Fluids and place it on a dry floor or level track.')
 elseif command == 'list' then
     for _, crane in ipairs(api.list()) do
         print(('#%d %s | %d columns | %s'):format(crane.id, rail.coordinates(crane.rail[crane.index]), #crane.queue, crane.status))
@@ -54,7 +55,7 @@ elseif command == 'remove' then
 elseif command == 'pause' or command == 'resume' then
     if not setEnabled(command == 'resume') then qerror('Load a fortress first.') end
 elseif command == 'help' or command == '--help' then
-    print('Build a Rail Crane from Build > Machines/Fluids.')
+    print('Choose Crane under Build > Machines/Fluids.')
     print('rail-crane [gui [ID]] | list | cancel ID | remove ID | pause | resume')
 else
     qerror('Unknown command. Run rail-crane help.')

@@ -3,7 +3,7 @@ building_rail_crane
 [OBJECT:BUILDING]
 
 [BUILDING_WORKSHOP:RAIL_CRANE]
-    [NAME:Rail Crane]
+    [NAME:Crane]
     [NAME_COLOR:6:0:1]
     [DIM:1:1]
     [WORK_LOCATION:1:1]
@@ -22,4 +22,4 @@ building_rail_crane
     [BUILD_ITEM:1:TRAPPARTS:NONE:NONE:NONE]
     [BUILD_ITEM:1:CHAIN:NONE:NONE:NONE]
     [BUILD_ITEM:2:WOOD:NONE:NONE:NONE]
-    [TOOLTIP:Build on dry ground or a level minecart track. Choose a boom height before selecting materials. Each raised level costs one extra log.]
+    [TOOLTIP:Build on dry ground or a level minecart track. Each raised level costs one extra log. Choose a magma-safe chain for magma lifts.]

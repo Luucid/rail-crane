@@ -116,7 +116,7 @@ end
 
 local function planDock(pos, dockId, docks, height, pending)
     local network = rail.trackNetwork(pos)
-    if trackClaimed(network, dockId, docks) then return nil, 'That track already has a Rail Crane.' end
+    if trackClaimed(network, dockId, docks) then return nil, 'That track already has a crane.' end
     return rail.discover(pos, dockId, height, function(crane)
         return footprintConflict(crane, nil, pending)
     end, network)
@@ -223,7 +223,7 @@ local function syncWorkshops()
             elseif not crane and building:getBuildStage() == 0 then
                 dfhack.buildings.deconstruct(building)
                 docks[id] = nil
-                dfhack.gui.showAnnouncement('Rail Crane order canceled. ' .. reason, COLOR_YELLOW, true)
+                dfhack.gui.showAnnouncement('Crane order canceled. ' .. reason, COLOR_YELLOW, true)
             end
         end
     end
@@ -278,9 +278,10 @@ local function nextWork(crane)
     local waiting
     local empty = {}
     local i = 1
+    local magma_safe = native.hasMagmaSafeChain(crane.building_id)
+    local platform_z = rail.buildLevel(crane)
     while i <= #crane.queue do
         local column = crane.queue[i]
-        local platform_z = rail.buildLevel(crane)
         local next_z = column.next_z
         if walls.isWall({x=column.x, y=column.y, z=next_z}) then
             while next_z <= column.z and walls.isWall({x=column.x, y=column.y, z=next_z}) do
@@ -292,7 +293,7 @@ local function nextWork(crane)
         else
             local stop, step = rail.stopFor(crane, column)
             local target = {x=column.x, y=column.y, z=next_z}
-            local ok, reason = walls.checkLift(target, platform_z)
+            local ok, reason = walls.checkLift(target, platform_z, magma_safe)
             if not stop then
                 waiting = waiting or 'Waiting for a clear crane and boom path'
             elseif not ok then
@@ -302,7 +303,7 @@ local function nextWork(crane)
                 local item_id = walls.reserve(column.material, rear)
                 if item_id then
                     crane.reservation = item_id
-                    local run = {column=column, target=target, stop=stop, step=step}
+                    local run = {column=column, target=target, stop=stop, step=step, magma_safe=magma_safe}
                     running[crane.id] = run
                     phase(run, 'park', 0)
                     persist()
@@ -342,6 +343,15 @@ local function updateCrane(crane)
         if currentPhase ~= 'wait_prep' and currentPhase ~= 'wait_operator' and currentPhase ~= 'wait_driver'
             and (not workers.active(run.worker, station) or not workers.arrived(run.worker, station)) then
             reset(crane, 'Worker left the station', #crane.queue > 0)
+            return
+        end
+    end
+
+    local lowering = (currentPhase == 'swing_target' and done) or currentPhase == 'lower' or currentPhase == 'release'
+    if lowering and not run.magma_safe then
+        local ok, reason = walls.checkMagma(run.target, boom.z)
+        if not ok then
+            reset(crane, reason, true)
             return
         end
     end
@@ -452,7 +462,8 @@ local function updateCrane(crane)
             reset(crane, 'Waiting for the overhead path to clear', true)
             return
         end
-        local ok, reason = walls.place(run.target, crane.reservation, run.column.material, boom.z)
+        local ok, reason = walls.place(run.target, crane.reservation, run.column.material, boom.z,
+            native.hasMagmaSafeChain(crane.building_id))
         if not ok then
             reset(crane, reason or 'Wall placement blocked', true)
             return
@@ -485,7 +496,7 @@ local function update()
                 if not ok then
                     local message = tostring(err):match('^[^\n]+')
                     if crane.error ~= message then
-                        dfhack.printerr(('Rail crane %d: %s'):format(crane.id, err))
+                        dfhack.printerr(('Crane %d: %s'):format(crane.id, err))
                         crane.error = message
                     end
                     reset(crane, 'Crane error (see DFHack console)', true)
@@ -499,7 +510,7 @@ end
 local function restore()
     if state or not available() then return end
     state = dfhack.persistent.getSiteData(SITE_KEY, {cranes={}, next_id=1, enabled=true})
-    native.prepareMaterials()
+    native.prepareDefinition()
     native.hideCompletedMount()
     nextWorkshopScan = 0
     workers.clear()
@@ -603,7 +614,7 @@ function api.inspect(crane, pos)
         end
     end
     if not rail.stopFor(crane, pos) then return nil, 'Out of reach or the boom path is blocked.' end
-    local next_z, reason = walls.inspect(pos, platform_z)
+    local next_z, reason = walls.inspect(pos, platform_z, native.hasMagmaSafeChain(crane.building_id))
     if next_z == nil then return nil, reason end
     return true, nil, next_z
 end

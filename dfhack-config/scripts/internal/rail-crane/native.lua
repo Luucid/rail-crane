@@ -1,6 +1,8 @@
 --@ module = true
 
+local sprites = reqscript('internal/rail-crane/sprites')
 local BUILDING_CODE = 'RAIL_CRANE'
+local BUILDING_NAME = 'Crane'
 local BASE_LOGS = 2
 
 local function matchesDefinition(id)
@@ -78,10 +80,11 @@ local function ensureIngredient(raw, itemType, quantity)
     raw.build_items:insert('#', entry)
 end
 
-function prepareMaterials()
+function prepareDefinition()
     local raw = permittedDefinition()
     if not raw then return end
-    -- Saved worlds can still carry the original two building filters.
+    -- Saved worlds carry their own copy of the workshop definition.
+    raw.name = BUILDING_NAME
     ensureIngredient(raw, df.item_type.CHAIN, 1)
     ensureIngredient(raw, df.item_type.WOOD, BASE_LOGS)
 end
@@ -122,6 +125,27 @@ function towerHeight(building)
         end
     end
     return math.max(0, count - BASE_LOGS)
+end
+
+function hasMagmaSafeChain(buildingId)
+    local building = getBuilding(buildingId)
+    if not building then return false end
+    for _, entry in ipairs(building.contained_items) do
+        local item = entry.item
+        if entry.use_mode == df.building_item_role_type.PERM and item and item:getType() == df.item_type.CHAIN then
+            local material = dfhack.matinfo.decode(item)
+            -- Metal chains and cloth ropes have the same item type.
+            if not material or not material.material.flags.IS_METAL then return false end
+            return dfhack.with_temp_object(df.job_item:new(), function(filter)
+                -- Apply only the material check. The chain item type has no
+                -- magma-safe job filter in DFHack.
+                filter.item_type = df.item_type.NONE
+                filter.flags2.magma_safe = true
+                return dfhack.job.isSuitableMaterial(filter, material.type, material.index, df.item_type.CHAIN)
+            end)
+        end
+    end
+    return false
 end
 
 local blankDockTexture
@@ -180,14 +204,22 @@ function reparentBuildMenu()
     if not raw then return end
 
     local index, original = findCraneButton(workshops, raw.id)
+    local _, button = findCraneButton(machines, raw.id)
     if original then
         if workshops.selected_button == original then workshops.selected_button = nil end
         workshops.bb_button:erase(index)
     end
-    if machines and not findCraneButton(machines, raw.id) then
-        machines.bb_button:insert('#', original or craneButton(raw))
+    if machines and not button then
+        button = original or craneButton(raw)
+        machines.bb_button:insert('#', button)
     elseif original then
         original:delete()
+    end
+
+    if button then
+        local texpos = sprites.pen({sprites.layer('menu_crane')}).tile
+        if texpos and button.texpos ~= texpos then button.texpos = texpos end
+        if button.str ~= BUILDING_NAME then button.str = BUILDING_NAME end
     end
 
     -- The game sizes this page before the crane is added. Keep its native
@@ -206,7 +238,7 @@ function buildMenuOverlay()
     local overlay = require('plugins.overlay')
     local Menu = defclass(nil, overlay.OverlayWidget)
     Menu.ATTRS{
-        desc='Lists Rail Crane under Machines/Fluids in the native Build menu.',
+        desc='Lists Crane under Machines/Fluids in the native Build menu.',
         default_enabled=true,
         fullscreen=true,
         viewscreens='dwarfmode/Building',

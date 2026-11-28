@@ -4,6 +4,7 @@ local M = {}
 
 local shapes = df.tiletype_shape
 local tile_materials = df.tiletype_material
+local MAGMA_CHAIN_REQUIRED = 'Magma requires a magma-safe chain'
 local floor_shapes = {
     [shapes.FLOOR] = true,
     [shapes.PEBBLES] = true,
@@ -45,20 +46,20 @@ local function is_open(attrs)
     return attrs.shape == shapes.EMPTY or attrs.shape == shapes.RAMP_TOP
 end
 
-local function blocked(pos, designation, occupancy)
-    if designation then
-        if designation.hidden then return 'Tile is unrevealed' end
-        if designation.flow_size > 0 and designation.liquid_type then
-            return 'Magma blocks this column'
-        end
-    end
+local function has_magma(designation)
+    return designation and designation.flow_size > 0 and designation.liquid_type
+end
+
+local function blocked(pos, designation, occupancy, magma_safe)
+    if designation and designation.hidden then return 'Tile is unrevealed' end
+    if not magma_safe and has_magma(designation) then return MAGMA_CHAIN_REQUIRED end
     if occupancy and (occupancy.building ~= df.tile_building_occ.None or occupancy.vehicle) then
         return 'A building or vehicle blocks this column'
     end
     if dfhack.buildings.findAtTile(pos) then return 'A building blocks this column' end
 end
 
-local function clearance(pos, platform_z)
+local function clearance(pos, platform_z, magma_safe)
     if pos.z > platform_z then return nil, 'Above the crane platform' end
     for z = pos.z + 1, platform_z do
         local over = at_height(pos, z)
@@ -66,8 +67,17 @@ local function clearance(pos, platform_z)
         if not attrs or not is_open(attrs) then
             return nil, 'Overhead terrain blocks the cable at z=' .. z
         end
-        local reason = blocked(over, designation, occupancy)
+        local reason = blocked(over, designation, occupancy, magma_safe)
         if reason then return nil, reason .. ' at z=' .. z end
+    end
+    return true
+end
+
+function M.checkMagma(pos, platform_z)
+    for z = pos.z, platform_z do
+        if has_magma(dfhack.maps.getTileFlags(at_height(pos, z))) then
+            return nil, MAGMA_CHAIN_REQUIRED .. ' at z=' .. z
+        end
     end
     return true
 end
@@ -90,15 +100,15 @@ local function solid_below(pos)
 end
 
 -- Returns the first wall level, leaving the requested top level to the caller.
-function M.inspect(pos, platform_z)
-    local clear, reason = clearance(pos, platform_z)
+function M.inspect(pos, platform_z, magma_safe)
+    local clear, reason = clearance(pos, platform_z, magma_safe)
     if not clear then return nil, reason end
     if M.isWall(pos) then return nil, 'A constructed wall is already at the selected height' end
     for z = pos.z, 0, -1 do
         local current = at_height(pos, z)
         local attrs, designation, occupancy = tile(current)
         if not attrs then return nil, 'Outside the fortress map' end
-        reason = blocked(current, designation, occupancy)
+        reason = blocked(current, designation, occupancy, magma_safe)
         if reason then return nil, reason .. ' at z=' .. z end
         if is_floor(attrs) then return z end
         if not is_open(attrs) then return nil, 'Terrain blocks the column at z=' .. z end
@@ -107,8 +117,8 @@ function M.inspect(pos, platform_z)
     return nil, 'No solid foundation under this column'
 end
 
-function M.checkLift(pos, platform_z)
-    local bottom, reason = M.inspect(pos, platform_z)
+function M.checkLift(pos, platform_z, magma_safe)
+    local bottom, reason = M.inspect(pos, platform_z, magma_safe)
     if not bottom then return nil, reason end
     if bottom ~= pos.z then return nil, 'The wall needs support directly below it' end
     local _, occupancy = dfhack.maps.getTileFlags(pos)
@@ -291,7 +301,7 @@ end
 local function create_wall_job(pos, item, designation)
     -- DFHack's planned-building placement rejects fluid over depth one. The
     -- suspension is synchronous and scoped to the exact footprint. Restore the
-    -- original depth before native completion so the rest of the water remains.
+    -- original depth before native completion.
     local depth = designation.flow_size
     local was_hidden = item.flags.hidden
     designation.flow_size = 0
@@ -314,8 +324,8 @@ local function create_wall_job(pos, item, designation)
     return building
 end
 
-function M.place(pos, id, token, platform_z)
-    local clear, reason = M.checkLift(pos, platform_z)
+function M.place(pos, id, token, platform_z, magma_safe)
+    local clear, reason = M.checkLift(pos, platform_z, magma_safe)
     if not clear then return nil, reason end
     local item = M.resolve(id, token)
     if not item then return nil, 'The reserved block is unavailable' end
@@ -336,8 +346,7 @@ function M.place(pos, id, token, platform_z)
     dfhack.buildings.completeBuild(building)
     if not M.isWall(pos) then return nil, 'Dwarf Fortress did not complete the wall' end
 
-    -- Solid masonry displaces water in its own square. The surrounding water
-    -- and every level above the completed wall keep their original depths.
+    -- Solid masonry displaces liquid in its own square.
     designation.flow_size = 0
     designation.flow_forbid = false
     dfhack.maps.enableBlockUpdates(block, true, true)

@@ -1,32 +1,45 @@
-RAIL CRANE 1.5.2
+CRANE 1.5.4
 Dwarf Fortress Steam 53.17 with DFHack 53.17-r1
 
 INSTALL
 Close Dwarf Fortress. In Steam, open Dwarf Fortress > Manage > Browse local
 files to open the game folder.
 
-Extract Rail-Crane-1.5.2.zip into the game folder. Let Windows merge the
-dfhack-config and mods folders and replace the Rail Crane scripts.
+Extract Crane-1.5.4.zip into the game folder. Let Windows merge the
+dfhack-config and mods folders and replace the crane scripts.
 
 If you use Code > Download ZIP on the main branch, open the folder inside
 the archive. Copy its dfhack-config and mods folders into the game folder.
 
 The game folder should now contain dfhack-config/scripts/rail-crane.lua
 and mods/rail_crane/info.txt. Launch the game with DFHack. For a new
-installation, open Mods on the Create New World screen and add Rail Crane
+installation, open Mods on the Create New World screen and add Crane
 before generating.
 
 To update, close the game, extract over the existing installation,
 and reopen the same save. Built cranes and queued columns persist.
 
-The mod list reads the display version from info.txt. If it still shows an
-older version after extraction, close the game and copy mods/rail_crane/info.txt into
-the existing rail_crane (2) folder under data/installed_mods. Steam may
-keep that folder under %APPDATA%/Bay 12 Games/Dwarf Fortress instead of
-the game directory.
+The mod list reads the name and version from info.txt. If it still shows
+the previous name or version after extraction, close the game and copy
+mods/rail_crane/info.txt into the existing rail_crane (2) folder under
+data/installed_mods. Steam may keep that folder under %APPDATA%/Bay 12
+Games/Dwarf Fortress instead of the game directory.
+
+STEAM WORKSHOP
+Install DFHack on Steam, subscribe to Crane, and launch Dwarf Fortress
+through DFHack. Enable Crane in the Mods list when creating a world.
+The Workshop mod includes the scripts.
+
+To switch an existing Crane fort to the Workshop version, choose Update
+when Dwarf Fortress offers the newer compatible mod. If you installed the
+manual ZIP, close the game and move these two paths out of
+dfhack-config/scripts before switching, since local scripts take priority.
+
+    rail-crane.lua
+    internal/rail-crane/
 
 BUILD A CRANE
-1. Open Build > Machines/Fluids > Rail Crane. Use [-] and [+] in the
+1. Open Build > Machines/Fluids > Crane. Use [-] and [+] in the
    placement panel to set the boom height. Height +0 works at the base level.
 2. Click a dry floor for a stationary crane or a level track for a rolling
    crane. The route can turn or close into a loop. Use one continuous path
@@ -70,9 +83,15 @@ working angle. It holds that angle until the crew starts the next lift.
 
 The selected z-level is included, up to the crane's boom. Columns start at
 solid ground, seabed, or existing masonry. Leave open space for the cable.
-The crane can lower into water. A wall below the surface stays under water.
-The wall displaces water in the volume it occupies. Piers and towers need
-walkable access for the crew.
+The crane can lower into water. For magma, choose a magma-safe metal chain
+such as iron or steel when building the crane. A crane with a rope or an
+unsafe chain rejects magma designations. If magma enters an active lift's
+path, the crane stops the lift and keeps the column queued until it can
+continue.
+
+Each wall displaces liquid in the tile it occupies. A wall below the
+surface stays submerged. Piers and towers need walkable access for the
+crew.
 
 The crew works at the base, and a raised boom hoists each block from the
 rear platform before swinging to the target. A rolling crane waits for an
@@ -89,5 +108,18 @@ choices and queued progress are saved with the site. On reload an interrupted
 lift starts again from block preparation.
 
 If the workshop is built but the crane controls do not appear, check that
-DFHack is running and the Rail Crane overlays are enabled in its control
+DFHack is running and the crane overlays are enabled in its control
 panel.
+
+WORKSHOP UPDATES
+Increase NUMERIC_VERSION in mods/rail_crane/info.txt for each release.
+Update DISPLAYED_VERSION, STEAM_DESCRIPTION, and STEAM_CHANGELOG for the
+new release. From the repository root, package the Workshop version in
+PowerShell.
+
+    .\tools\package-workshop.ps1 -Destination 'C:\path\to\Dwarf Fortress\mods\mod_upload\rail_crane'
+
+From the Dwarf Fortress title screen, open Mods > Publish mods and choose
+Crane. Use the same upload folder for later releases. The packaging script
+preserves the STEAM_FILE_ID Steam writes there, so updates go to the
+original listing.
